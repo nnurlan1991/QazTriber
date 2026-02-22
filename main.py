@@ -48,6 +48,7 @@ import sounddevice as sd
 import soundfile as sf
 import datetime
 import time
+import webbrowser
 
 from engine.whisper_engine import WhisperEngine
 
@@ -240,7 +241,12 @@ class WaveformWidget:
             # Обрезаем так, чтобы длина делилась на step
             trimmed = view_audio[:render_w * step]
             reshaped = trimmed.reshape(-1, step)
-            peaks = np.max(np.abs(reshaped), axis=1) * (mid * 0.9)
+            
+            # Супер-оптимизация для огромных файлов (2-х часовых)
+            if step > 1000:
+                peaks = np.max(np.abs(reshaped[:, ::(step//100)]), axis=1) * (mid * 0.9)
+            else:
+                peaks = np.max(np.abs(reshaped), axis=1) * (mid * 0.9)
             
             for x, peak in enumerate(peaks):
                 if peak > 0.5:
@@ -333,6 +339,14 @@ class QazTriberApp(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # Системное меню (macOS Top Menu)
+        menu_bar = Menu(self)
+        help_menu = Menu(menu_bar, tearoff=0)
+        help_menu.add_command(label="Обратная связь (Telegram Написать)", 
+                              command=lambda: webbrowser.open("https://t.me/nurlan_nursultan"))
+        menu_bar.add_cascade(label="Помощь", menu=help_menu)
+        self.config(menu=menu_bar)
+
         # --- СОСТОЯНИЯ ---
         self.engine: Optional[WhisperEngine] = None
         self.audio_path: Optional[str] = None
@@ -361,9 +375,17 @@ class QazTriberApp(ctk.CTk):
         self.sidebar.grid_columnconfigure(0, weight=1)
 
         # Логотип
-        ctk.CTkLabel(self.sidebar, text="🎙 QazTriber",
-                     font=ctk.CTkFont(size=24, weight="bold"),
-                     text_color="#ffffff").grid(row=0, column=0, padx=20, pady=(25, 15))
+        lbl_logo = ctk.CTkLabel(self.sidebar, text="🎙 QazTriber",
+                                font=ctk.CTkFont(size=24, weight="bold"),
+                                text_color="#ffffff")
+        lbl_logo.grid(row=0, column=0, padx=20, pady=(25, 5))
+        
+        # Ссылка на автора в сайдбаре (дополнительно к меню)
+        lbl_author = ctk.CTkLabel(self.sidebar, text="Связь с разработчиком",
+                                  font=ctk.CTkFont(size=12, underline=True),
+                                  text_color="#00aaff", cursor="hand2")
+        lbl_author.grid(row=1, column=0, pady=(0, 20))
+        lbl_author.bind("<Button-1>", lambda e: webbrowser.open("https://t.me/nurlan_nursultan"))
 
         # --- ВЫБОР ФАЙЛА ---
         self.btn_file = ctk.CTkButton(
@@ -597,6 +619,13 @@ class QazTriberApp(ctk.CTk):
             fg_color="#2b2b2b", hover_color="#3a3a3a",
             command=self.copy_all_text)
         self.btn_copy_all.pack(side="right")
+        
+        self.btn_reset = ctk.CTkButton(
+            bottom, text="🗑 Сброс", height=40, width=100,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#8b0000", hover_color="#aa0000",
+            command=self.reset_app)
+        self.btn_reset.pack(side="left", padx=(10, 0))
 
         # Горячие клавиши
         if sys.platform == "darwin":
@@ -752,8 +781,9 @@ class QazTriberApp(ctk.CTk):
             filetypes=[("Audio", "*.wav *.mp3 *.m4a *.ogg *.flac")])
         if f:
             self.audio_path = f
-            self.lbl_file_hint.configure(text=os.path.basename(f), text_color="#00cc66")
-            self._update_status("✅ Файл загружен.")
+            self.lbl_file_hint.configure(text=f"⏳ Загрузка...", text_color="#aaaaaa")
+            self._update_status("⏳ Обработка длинного файла: это можёт занять несколько секунд...")
+            self.update_idletasks() # Принудительно обновить UI
 
             def _load():
                 try:
@@ -762,10 +792,16 @@ class QazTriberApp(ctk.CTk):
                     self.original_audio_data = self.playback_data.copy()
                     self.playback_sr = 16000
                     self.playback_pos = 0.0
-                    self.after(0, self.show_player_ui)
+                    self.after(0, self._on_audio_loaded, f)
                 except Exception as e:
                     print(f"Плеер: {e}")
+                    self.after(0, self._update_status, f"❌ Ошибка: {e}")
             threading.Thread(target=_load, daemon=True).start()
+
+    def _on_audio_loaded(self, filepath):
+        self.lbl_file_hint.configure(text=os.path.basename(filepath), text_color="#00cc66")
+        self._update_status("✅ Файл загружен в память. Готов к работе.")
+        self.show_player_ui()
 
     def show_player_ui(self):
         if self.playback_data is None: return
@@ -965,6 +1001,40 @@ class QazTriberApp(ctk.CTk):
         # Визуальная обратная связь
         self.btn_copy_all.configure(text="✅ Скопировано!")
         self.after(2000, lambda: self.btn_copy_all.configure(text="📋 Скопировать всё"))
+
+    def reset_app(self):
+        """Полный сброс приложения в исходное состояние."""
+        # 1. Останавливаем воспроизведение
+        if self.is_playing:
+            self.stop_playback()
+        
+        # 2. Очищаем данные аудио
+        self.audio_path = None
+        self.playback_data = None
+        self.original_audio_data = None
+        self.recording_data = []
+        self.playback_pos = 0.0
+        
+        # 3. Прячем интерфейс плеера и визуализатора
+        self.waveform.clear()
+        self.frame_player.grid_forget()
+        
+        # 4. Сбрасываем лейбл файла
+        self.lbl_file_hint.configure(text="Файл не выбран", text_color="#666666")
+        
+        # 5. Очищаем окно вывода текста
+        self.output_box.delete("1.0", "end")
+        self.output_box.insert("1.0",
+            "Здесь появится распознанный текст.\n\n"
+            "Инструкция:\n"
+            "1. Выберите аудиофайл или запишите с микрофона.\n"
+            "2. Выберите модель.\n"
+            "3. Нажмите «Начать транскрибацию».")
+            
+        # 6. Обновляем статус
+        self.p_bar.set(0)
+        self.lbl_percent.configure(text="")
+        self._update_status("🟢 Готов к работе. Выберите аудиофайл.", color="#00cc66")
 
     def force_stop_asr(self):
         """Немедленно устанавливает stop_event — прерывает между чанками."""
