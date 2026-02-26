@@ -62,11 +62,13 @@ def _filter_repetitions(text: str, max_repeats: int = 4) -> str:
 class WhisperEngine(BaseASREngine):
     def __init__(self):
         self._engine = None
-        self._use_transformers = False
+        self._model = None
         self._processor = None
+        self._use_transformers = False
         self.beam_size = 5
         self.device = "cpu"
         self._sr = 16000
+        self._torch_dtype = torch.float32
 
     # ── Загрузка модели ──────────────────────────────────────
 
@@ -128,9 +130,16 @@ class WhisperEngine(BaseASREngine):
 
         try:
             if self._use_transformers:
-                from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+                from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
-                torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+                # ВНИМАНИЕ: На Apple Silicon (MPS) использование float16 часто приводит к галлюцинациям 
+                # в виде бесконечных "!" или пустых строк для этой модели. 
+                # Принудительно используем float32 для стабильности.
+                if torch.backends.mps.is_available():
+                    self._torch_dtype = torch.float32
+                    print("[WhisperEngine] Apple Silicon detected. Forcing float32 for stability.")
+                else:
+                    self._torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
                 # ── Мониторинг скачивания в MB ──────────────────
                 _monitor_stop = threading.Event()
@@ -153,30 +162,67 @@ class WhisperEngine(BaseASREngine):
                 monitor_t.start()
 
                 try:
-                    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                        final_path, dtype=torch_dtype,
+                    self._model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                        final_path, 
+                        torch_dtype=self._torch_dtype,
                         low_cpu_mem_usage=True,
                         cache_dir=cache_dir
                     )
                 finally:
                     _monitor_stop.set()
 
-                model.to(device)
+                self._model.to(device)
+
+
 
                 report("📝 Загрузка токенизатора...", 0.0)
-                processor = AutoProcessor.from_pretrained(final_path, cache_dir=cache_dir)
+                self._processor = AutoProcessor.from_pretrained(final_path, cache_dir=cache_dir)
+                processor = self._processor
 
-                report("🚀 Сборка pipeline...", 0.5)
-                self._engine = pipeline(
-                    "automatic-speech-recognition",
-                    model=model,
-                    tokenizer=processor.tokenizer,
-                    feature_extractor=processor.feature_extractor,
-                    batch_size=1,
-                    dtype=torch_dtype,
-                    device=model.device,
-                    ignore_warning=True,
-                )
+                # --- MONKEYPATCH ДЛЯ ЗАЩИТЫ ОТ OVERFLOWERROR В WHISPER ---
+                _orig_decode = processor.tokenizer.decode
+                def _safe_decode(token_ids, *args, **kwargs):
+                    def flatten(l):
+                        for el in l:
+                            if hasattr(el, "__iter__") and not isinstance(el, (str, bytes)):
+                                yield from flatten(el)
+                            else:
+                                yield el
+
+                    # Превращаем вход в плоский список ID
+                    if hasattr(token_ids, "tolist"):
+                        ids_list = token_ids.tolist()
+                    elif hasattr(token_ids, "__iter__"):
+                        ids_list = list(token_ids)
+                    else:
+                        ids_list = [token_ids]
+                    
+                    flat_ids = list(flatten(ids_list))
+                    
+                    max_id = processor.tokenizer.vocab_size + len(processor.tokenizer.get_added_vocab())
+                    
+                    filtered_ids = []
+                    for t in flat_ids:
+                        try:
+                            val = int(t)
+                            if 0 <= val < max_id:
+                                filtered_ids.append(val)
+                        except (TypeError, ValueError):
+                            continue
+                            
+                    try:
+                        return _orig_decode(filtered_ids, *args, **kwargs)
+                    except Exception:
+                        try:
+                            return _orig_decode([t for t in filtered_ids if t < processor.tokenizer.vocab_size], *args, **kwargs)
+                        except Exception:
+                            return ""
+                processor.tokenizer.decode = _safe_decode
+                # ---------------------------------------------------------
+
+                report("🚀 Модель готова...", 0.9)
+                # Вызов pipeline удален, используем model.generate напрямую для стабильности
+                self._engine = None 
             else:
                 report("📦 Загрузка Whisper...", 0.0)
                 self._engine = whisper.load_model(
@@ -194,10 +240,12 @@ class WhisperEngine(BaseASREngine):
                    sr: int = 16000,
                    initial_prompt: Optional[str] = None,
                    progress_callback: Optional[Callable] = None,
-                   stop_event: Optional[threading.Event] = None) -> str:
+                   stop_event: Optional[threading.Event] = None,
+                   text_callback: Optional[Callable[[str], None]] = None) -> str:
         """
         Транскрибирует аудио с реальным прогрессом по чанкам.
         stop_event.is_set() → немедленное прерывание между чанками.
+        text_callback выводит текст по мере его распознавания.
         """
         # Нормализация
         audio = np.array(audio_chunk, dtype=np.float32)
@@ -208,8 +256,8 @@ class WhisperEngine(BaseASREngine):
             audio = audio / 32768.0
         elif max_val > 1.0:
             audio = audio / max_val
-
-        print(f"[Transcribe] shape={audio.shape}, max={np.abs(audio).max():.4f}")
+        if len(audio) == 0:
+            return ""
 
         def prog(msg, frac=None):
             if progress_callback:
@@ -219,7 +267,7 @@ class WhisperEngine(BaseASREngine):
                     progress_callback(msg)
 
         if self._use_transformers:
-            return self._transcribe_hf_chunked(audio, sr, initial_prompt, prog, stop_event)
+            return self._transcribe_hf_chunked(audio, sr, initial_prompt, prog, stop_event, text_callback)
         else:
             return self._transcribe_openai(audio, initial_prompt, prog)
 
@@ -228,40 +276,69 @@ class WhisperEngine(BaseASREngine):
                                 sr: int,
                                 initial_prompt: Optional[str],
                                 prog: Callable,
-                                stop_event: Optional[threading.Event]) -> str:
-        CHUNK_SEC = 30
-        chunk_samples = CHUNK_SEC * sr
+                                stop_event: Optional[threading.Event],
+                                text_callback: Optional[Callable[[str], None]]) -> str:
+
         total_dur = len(audio) / sr
-        n_chunks = max(1, math.ceil(len(audio) / chunk_samples))
-        texts = []
+        CHUNK_SEC = 29
+        chunk_samples = CHUNK_SEC * sr
 
+        starts = list(range(0, len(audio), chunk_samples))
+        n_chunks = len(starts)
+        texts: list[str] = []
+
+        # generate_kwargs — подсказка языка (казахский) для шалақазахский речи.
+        # pipeline сам обрабатывает decoder_start_token_id, forced_decoder_ids,
+        # attention_mask — НЕ делаем это вручную.
         generate_kwargs: dict = {
-            "num_beams": self.beam_size,
-            "repetition_penalty": 1.3,
-            "no_repeat_ngram_size": 3,
-            "max_new_tokens": 256,
+            "language": "kk",
+            "task": "transcribe",
         }
+        if self.beam_size > 1:
+            generate_kwargs["num_beams"] = self.beam_size
 
-        for i in range(n_chunks):
-            # ── Жёсткий стоп ────────────────────────────────
+        for i, s in enumerate(starts):
             if stop_event and stop_event.is_set():
                 raise InterruptedError("Остановлено пользователем")
 
-            s = i * chunk_samples
             e = min(s + chunk_samples, len(audio))
             chunk = audio[s:e]
+
+            if len(chunk) < sr * 0.3:
+                continue
+
             t0 = _fmt_time(s / sr)
             t1 = _fmt_time(min(e / sr, total_dur))
-            frac = i / n_chunks
+            prog(f"⚙️ Чанк {i + 1}/{n_chunks}  {t0}–{t1}", i / n_chunks)
 
-            prog(f"⚙️ Чанк {i + 1}/{n_chunks}  {t0}–{t1}", frac)
+            try:
+                # ── Прямой вызов генерации вместо pipeline ──────────────────
+                # Это дает больше контроля и стабильности с whisper-turbo-ksc2
+                input_features = self._processor(
+                    chunk, sampling_rate=sr, return_tensors="pt"
+                ).input_features.to(self.device).to(self._torch_dtype)
 
-            audio_input = {"array": chunk, "sampling_rate": sr}
-            result = self._engine(audio_input, generate_kwargs=generate_kwargs)
-            print(f"[Chunk {i+1}/{n_chunks}] {result}")
+                with torch.no_grad():
+                    predicted_ids = self._model.generate(
+                        input_features,
+                        **generate_kwargs
+                    )
 
-            if isinstance(result, dict):
-                texts.append(_filter_repetitions(result.get("text", "").strip()))
+                text = self._processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+                text = text.strip()
+
+                if text:
+                    text = _filter_repetitions(text)
+                    texts.append(text)
+                    if text_callback:
+                        text_callback(text + " ")
+                else:
+                    # Пустой результат — возможно, тишина
+                    pass
+            except Exception as exc:
+                import traceback
+                print(f"[Чанк {i + 1}] Ошибка: {exc}")
+                traceback.print_exc()
 
         prog(f"✅ Транскрибация завершена ({n_chunks} чанков)", 1.0)
         return " ".join(texts)
@@ -325,6 +402,7 @@ class WhisperEngine(BaseASREngine):
 
     def unload_model(self) -> None:
         self._engine = None
+        self._model = None
         self._processor = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

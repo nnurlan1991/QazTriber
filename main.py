@@ -138,10 +138,24 @@ class WaveformWidget:
         self.view_end = len(audio)
         self.sel_start = self.sel_end = None
         self.btn_scissors.pack_forget()
+        
+        # DOWN-SAMPLING FOR RENDER (approx 100 points per second)
+        target_sr = 100
+        step = max(1, sr // target_sr)
+        n = len(audio)
+        # Fast downscale: take absolute max in each `step` window
+        render_len = n // step
+        if render_len > 0:
+            reshaped = np.abs(audio[:render_len * step]).reshape(-1, step)
+            self.display_data = np.max(reshaped, axis=1)
+        else:
+            self.display_data = np.abs(audio)
+        self.display_step = step
+            
         self._redraw()
 
     def clear(self):
-        self.audio_data = None; self._live_rms = []
+        self.audio_data = None; self.display_data = None; self._live_rms = []
         self.sel_start = self.sel_end = None
         self.view_start = self.view_end = 0
         self.btn_scissors.pack_forget()
@@ -230,28 +244,28 @@ class WaveformWidget:
                 
         mid = h // 2
         
-        # Оптимизированный рендер
-        view_audio = self.audio_data[vs:ve]
-        n = len(view_audio)
-        step = max(1, n // w)
-        
-        # Быстрое нахождение пиков (вместо медленного for-if)
-        render_w = min(w, n // step)
-        if render_w > 0:
-            # Обрезаем так, чтобы длина делилась на step
-            trimmed = view_audio[:render_w * step]
-            reshaped = trimmed.reshape(-1, step)
+        # Оптимизированный рендер по заранее уменьшенному массиву
+        if hasattr(self, 'display_data') and self.display_data is not None:
+            # Переводим view_start и view_end в индексы display_data
+            d_vs = int(vs / self.display_step)
+            d_ve = int(ve / self.display_step)
             
-            # Супер-оптимизация для огромных файлов (2-х часовых)
-            if step > 1000:
-                peaks = np.max(np.abs(reshaped[:, ::(step//100)]), axis=1) * (mid * 0.9)
-            else:
-                peaks = np.max(np.abs(reshaped), axis=1) * (mid * 0.9)
+            view_display = self.display_data[d_vs:d_ve]
+            n_disp = len(view_display)
             
-            for x, peak in enumerate(peaks):
-                if peak > 0.5:
-                    bh = int(peak)
-                    c.create_line(x, mid - bh, x, mid + bh, fill=self.WAVE_COL, width=1)
+            if n_disp > 0:
+                d_step = max(1, n_disp // w)
+                render_w = min(w, n_disp // d_step)
+                
+                if render_w > 0:
+                    trimmed = view_display[:render_w * d_step]
+                    reshaped = trimmed.reshape(-1, d_step)
+                    peaks = np.max(reshaped, axis=1) * (mid * 0.9)
+                    
+                    for x, peak in enumerate(peaks):
+                        if peak > 0.5:
+                            bh = int(peak)
+                            c.create_line(x, mid - bh, x, mid + bh, fill=self.WAVE_COL, width=1)
 
         # Рисуем ползунок прогресса если он на экране
         prog_sample = self.play_progress * len(self.audio_data)
@@ -264,6 +278,21 @@ class WaveformWidget:
             c.create_line(self._sample_to_x(self.sel_start), 0, self._sample_to_x(self.sel_start), h, fill=self.MARK_L, width=2)
         if self.sel_end is not None and vs <= self.sel_end <= ve:
             c.create_line(self._sample_to_x(self.sel_end), 0, self._sample_to_x(self.sel_end), h, fill=self.MARK_R, width=2)
+            
+        # Текст с длительностью посередине выделения внизу
+        if self.sel_start is not None and self.sel_end is not None:
+            s_smpl, e_smpl = sorted([self.sel_start, self.sel_end])
+            if (e_smpl - s_smpl) > self.sr * 0.1:
+                mid_x = (self._sample_to_x(s_smpl) + self._sample_to_x(e_smpl)) / 2
+                if 0 <= mid_x <= w:
+                    duration = (e_smpl - s_smpl) / self.sr
+                    if duration < 60:
+                        dur_text = f"Выделено: {duration:.1f} сек"
+                    else:
+                        m = int(duration // 60)
+                        s = int(duration % 60)
+                        dur_text = f"Выделено: {m} мин {s:02d} сек"
+                    c.create_text(mid_x, h - 12, text=dur_text, fill="#ffffff", font=("Helvetica", 11, "bold"), justify="center")
 
     def _press(self, e):
         if self.audio_data is None: return
@@ -289,8 +318,14 @@ class WaveformWidget:
         else:
             if self.sel_start is not None and self.sel_end is not None:
                 s, en = sorted([self.sel_start, self.sel_end])
-                if en - s > self.sr * 0.1:
+                length_sec = (en - s) / self.sr
+                if length_sec > 0.1:
                     self.sel_start, self.sel_end = s, en
+                    if length_sec < 60:
+                        btn_text = f"✂️ Обрезать выделенное ({length_sec:.1f} сек)"
+                    else:
+                        btn_text = f"✂️ Обрезать выделенное ({int(length_sec//60)} мин {int(length_sec%60):02d} сек)"
+                    self.btn_scissors.configure(text=btn_text)
                     self.btn_scissors.pack(fill="x", padx=6, pady=(2, 6))
                 else:
                     self.sel_start = self.sel_end = None
@@ -322,11 +357,29 @@ class WaveformWidget:
         self._redraw()
 
     def _do_crop(self):
-        if self.audio_data is None or self.sel_start is None or self.sel_end is None: return
-        s = int(min(self.sel_start, self.sel_end))
-        e = int(max(self.sel_start, self.sel_end))
-        self._on_crop(self.audio_data[s:e], self.sr)
+        try:
+            if self.audio_data is None or self.sel_start is None or self.sel_end is None: return
+            s = int(min(self.sel_start, self.sel_end))
+            e = int(max(self.sel_start, self.sel_end))
+            self._on_crop(self.audio_data[s:e], self.sr)
+        except Exception as e:
+            print(f"Ошибка при обрезке: {e}")
 
+    def on_closing(self):
+        try:
+            self._cleanup_recordings()
+        except Exception as e:
+            print(f"Ошибка при очистке: {e}")
+        
+        # Принудительная очистка модели перед выходом (очень важно для API Mode)
+        if hasattr(self, 'engine') and self.engine is not None:
+            try:
+                self.engine.unload_model()
+            except Exception as e:
+                print(f"Ошибка при выгрузке модели: {e}")
+
+        self.quit()
+        self.destroy()
 
 class QazTriberApp(ctk.CTk):
     def __init__(self):
@@ -408,19 +461,22 @@ class QazTriberApp(ctk.CTk):
                      font=ctk.CTkFont(size=13, weight="bold"),
                      text_color="#cccccc").pack(anchor="w", padx=12, pady=(10, 6))
 
-        self.load_method_var = ctk.StringVar(value="auto")
+        self.load_method_var = ctk.StringVar(value="saved")
+        
+        self.rb_saved = ctk.CTkRadioButton(box_model, text="Встроенная/Скачанные (offline)",
+                                            variable=self.load_method_var, value="saved",
+                                            command=self.toggle_model_ui, text_color="#cccccc")
+        self.rb_saved.pack(anchor="w", padx=12, pady=2)
+        
         self.rb_auto = ctk.CTkRadioButton(box_model, text="Авто-скачивание (онлайн)",
                                            variable=self.load_method_var, value="auto",
                                            command=self.toggle_model_ui, text_color="#cccccc")
         self.rb_auto.pack(anchor="w", padx=12, pady=2)
+        
         self.rb_local = ctk.CTkRadioButton(box_model, text="Локальный файл (.pt)",
                                             variable=self.load_method_var, value="local",
                                             command=self.toggle_model_ui, text_color="#cccccc")
-        self.rb_local.pack(anchor="w", padx=12, pady=2)
-        self.rb_saved = ctk.CTkRadioButton(box_model, text="Скачанные (offline)",
-                                            variable=self.load_method_var, value="saved",
-                                            command=self.toggle_model_ui, text_color="#cccccc")
-        self.rb_saved.pack(anchor="w", padx=12, pady=(2, 8))
+        self.rb_local.pack(anchor="w", padx=12, pady=(2, 8))
 
         # Авто-режим
         self.frame_auto = ctk.CTkFrame(box_model, fg_color="transparent")
@@ -428,6 +484,7 @@ class QazTriberApp(ctk.CTk):
         ctk.CTkLabel(self.frame_auto, text="Размер модели:",
                      font=ctk.CTkFont(size=11), text_color="#888888").pack(anchor="w")
         self.quality_map = {
+            "🇰🇿 KZ Turbo (қазақша+русский)": "abilmansplus/whisper-turbo-ksc2",
             "🚀 Medium (баланс)": "medium",
             "⚡ Tiny (быстро)": "tiny",
             "💨 Base": "base",
@@ -436,7 +493,7 @@ class QazTriberApp(ctk.CTk):
             "🔥 Turbo": "turbo",
             "✨ Свой (Hugging Face)": "custom"
         }
-        self.quality_var = ctk.StringVar(value="🚀 Medium (баланс)")
+        self.quality_var = ctk.StringVar(value="🇰🇿 KZ Turbo (қазақша+русский)")
         self.quality_menu = ctk.CTkOptionMenu(
             self.frame_auto, values=list(self.quality_map.keys()),
             variable=self.quality_var, fg_color="#2b2b2b",
@@ -627,12 +684,27 @@ class QazTriberApp(ctk.CTk):
             command=self.reset_app)
         self.btn_reset.pack(side="left", padx=(10, 0))
 
+        # Чекбокс API Mode (сохранение модели в памяти)
+        self.keep_model_var = ctk.BooleanVar(value=False)
+        self.chk_keep_model = ctk.CTkCheckBox(
+            bottom, text="⚡ Оставить в памяти (мгновенный старт)",
+            variable=self.keep_model_var,
+            font=ctk.CTkFont(size=12), text_color="#aaaaaa",
+            fg_color="#0055bb", hover_color="#0044aa"
+        )
+        self.chk_keep_model.pack(side="left", padx=(20, 0))
+
         # Горячие клавиши
         if sys.platform == "darwin":
             self.bind_all("<KeyPress>", self._handle_hotkey)
+            self.createcommand("::tk::mac::OpenDocument", self._mac_open_document)
 
-        # Загрузка списка моделей
+        # Очистка старых записей из прошлых сессий
+        self._cleanup_recordings()
+
+        # Загрузка списка моделей и корректное отображение нужного меню при старте
         self.after(300, self.refresh_model_menu)
+        self.after(350, self.toggle_model_ui)
 
     # ================================================================
     # КОНТЕКСТНОЕ МЕНЮ (правая кнопка / горячие клавиши)
@@ -640,89 +712,65 @@ class QazTriberApp(ctk.CTk):
     def _add_context_menu(self, widget):
         menu = Menu(self, tearoff=0, bg="#2b2b2b", fg="#ffffff",
                     activebackground="#0055bb", font=("Helvetica", 12))
-        menu.add_command(label="Копировать   ⌘C", command=lambda: self._copy(None, widget))
-        menu.add_command(label="Вставить      ⌘V", command=lambda: self._paste(None, widget))
-        menu.add_command(label="Вырезать     ⌘X", command=lambda: self._cut(None, widget))
+        menu.add_command(label="Копировать   ⌘C", command=lambda: self._execute_cmd(widget, "<<Copy>>"))
+        menu.add_command(label="Вставить      ⌘V", command=lambda: self._execute_cmd(widget, "<<Paste>>"))
+        menu.add_command(label="Вырезать     ⌘X", command=lambda: self._execute_cmd(widget, "<<Cut>>"))
         menu.add_separator()
-        menu.add_command(label="Выделить всё ⌘A", command=lambda: self._select_all(None, widget))
+        menu.add_command(label="Выделить всё ⌘A", command=lambda: self._execute_cmd(widget, "<<SelectAll>>"))
+
+        def show_menu(event):
+            menu.tk_popup(event.x_root, event.y_root)
+        
+        # Правая кнопка мыши (macOS: Button-2/Button-3, Windows: Button-3)
         btn = "<Button-2>" if sys.platform == "darwin" else "<Button-3>"
-        widget.bind(btn, lambda e: menu.tk_popup(e.x_root, e.y_root))
-        # Также привязываем Cmd+клавиши прямо к виджету
-        widget.bind("<Command-c>", lambda e: self._copy(e, widget))
-        widget.bind("<Command-v>", lambda e: self._paste(e, widget))
-        widget.bind("<Command-x>", lambda e: self._cut(e, widget))
-        widget.bind("<Command-a>", lambda e: self._select_all(e, widget))
+        widget.bind(btn, show_menu)
+        # Дополнительный бинд для Control-Click на маке
+        widget.bind("<Control-Button-1>", show_menu)
 
-    def _paste(self, event, widget=None):
-        if widget is None: widget = self.focus_get()
-        if widget and hasattr(widget, "insert"):
-            try:
-                content = self.clipboard_get()
-                if isinstance(widget, ctk.CTkTextbox):
-                    try: widget.delete("sel.first", "sel.last")
-                    except: pass
-                    widget.insert("insert", content)
-                else:
-                    try: widget.delete("sel.first", "sel.last")
-                    except: pass
-                    widget.insert("insert", content)
-                return "break"
-            except: pass
-
-    def _copy(self, event, widget=None):
-        if widget is None: widget = self.focus_get()
-        if widget:
-            try:
-                content = ""
-                if isinstance(widget, ctk.CTkTextbox):
-                    content = widget.get("sel.first", "sel.last")
-                elif hasattr(widget, "selection_get"):
-                    content = widget.selection_get()
-                else:
-                    content = widget.get()
-                if content:
-                    self.clipboard_clear()
-                    self.clipboard_append(content)
-                return "break"
-            except: pass
-
-    def _cut(self, event, widget=None):
-        self._copy(event, widget)
-        if widget is None: widget = self.focus_get()
-        if widget and hasattr(widget, "delete"):
-            try: widget.delete("sel.first", "sel.last"); return "break"
-            except: pass
-
-    def _select_all(self, event, widget=None):
-        if widget is None: widget = self.focus_get()
-        if widget:
-            if isinstance(widget, ctk.CTkEntry):
-                widget.select_range(0, "end"); widget.icursor("end")
-            elif isinstance(widget, ctk.CTkTextbox):
-                widget.tag_add("sel", "1.0", "end")
-            return "break"
+    def _execute_cmd(self, widget, cmd):
+        try:
+            inner = widget._textbox if hasattr(widget, "_textbox") else widget
+            inner = inner._entry if hasattr(inner, "_entry") else inner
+            
+            if cmd == "<<SelectAll>>":
+                if hasattr(inner, "tag_add"):
+                    inner.tag_add("sel", "1.0", "end")
+                elif hasattr(inner, "select_range"):
+                    inner.select_range(0, "end"); inner.icursor("end")
+            else:
+                inner.event_generate(cmd)
+        except Exception as e:
+            print("CMD Error:", e)
 
     def _handle_hotkey(self, event):
-        """Глобальный перехват горячих клавиш macOS."""
-        cmd = (event.state & 0x8) or (event.state & 0x10) or (event.state & 0x100)
-        if not cmd: return
+        """Перехват стандартных Command+..."""
+        cmd_pressed = event.state & 0x8 or event.state & 0x10 or getattr(event, 'state', 0) in (8, 9, 24, 25)
+        if not cmd_pressed: return
         key = event.keysym.lower()
-        if key == "v": return self._paste(event)
-        elif key == "c": return self._copy(event)
-        elif key == "a": return self._select_all(event)
-        elif key == "x": return self._cut(event)
+        if key in ["c", "v", "x", "a"]:
+            w = self.focus_get()
+            if w:
+                if key == "c": self._execute_cmd(w, "<<Copy>>")
+                elif key == "v": self._execute_cmd(w, "<<Paste>>")
+                elif key == "x": self._execute_cmd(w, "<<Cut>>")
+                elif key == "a": self._execute_cmd(w, "<<SelectAll>>")
+                return "break"
 
     # ================================================================
     # УПРАВЛЕНИЕ МОДЕЛЯМИ
     # ================================================================
     def refresh_model_menu(self):
-        new_values = []
-        for display, internal in self.quality_map.items():
-            if internal == "custom":
-                new_values.append(display); continue
-            suffix = " ✓" if WhisperEngine.is_model_downloaded(internal, MODELS_DIR) else ""
-            new_values.append(f"{display}{suffix}")
-        self.quality_menu.configure(values=new_values)
+        def _fetch_models():
+            new_values = []
+            for display, internal in self.quality_map.items():
+                if internal == "custom":
+                    new_values.append(display); continue
+                is_downloaded = WhisperEngine.is_model_downloaded(internal, MODELS_DIR) or \
+                                WhisperEngine.is_model_downloaded(internal, INTERNAL_MODELS_DIR)
+                suffix = " ✓" if is_downloaded else ""
+                new_values.append(f"{display}{suffix}")
+            self.after(0, lambda: self.quality_menu.configure(values=new_values))
+        threading.Thread(target=_fetch_models, daemon=True).start()
 
     def toggle_model_ui(self):
         method = self.load_method_var.get()
@@ -746,15 +794,39 @@ class QazTriberApp(ctk.CTk):
             self.frame_custom_hf.pack_forget()
 
     def refresh_saved_models_list(self):
-        models = WhisperEngine.get_downloaded_models(MODELS_DIR)
-        if not models:
-            self.saved_models_menu.configure(values=["Кэш пуст"])
-            self.saved_models_var.set("Кэш пуст")
-        else:
-            names = [m["name"] for m in models]
-            self.saved_models_menu.configure(values=names)
-            if self.saved_models_var.get() not in names:
-                self.saved_models_var.set(names[0])
+        self.saved_models_menu.configure(values=["Обновление..."])
+        self.saved_models_var.set("Обновление...")
+        
+        def _fetch():
+            models = []
+            seen_names = set()
+            
+            internal_models = WhisperEngine.get_downloaded_models(INTERNAL_MODELS_DIR)
+            for im in internal_models:
+                name = im["name"]
+                if name not in seen_names:
+                    seen_names.add(name)
+                    im["name"] = f"[Встроенная] {name}"
+                    models.append(im)
+                    
+            external_models = WhisperEngine.get_downloaded_models(MODELS_DIR)
+            for em in external_models:
+                name = em["name"]
+                if name not in seen_names:
+                    seen_names.add(name)
+                    models.append(em)
+                
+            def _apply():
+                if not models:
+                    self.saved_models_menu.configure(values=["Кэш пуст"])
+                    self.saved_models_var.set("Кэш пуст")
+                else:
+                    names = [m["name"] for m in models]
+                    self.saved_models_menu.configure(values=names)
+                    if self.saved_models_var.get() not in names:
+                        self.saved_models_var.set(names[0])
+            self.after(0, _apply)
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def delete_selected_model(self):
         name = self.saved_models_var.get()
@@ -780,23 +852,30 @@ class QazTriberApp(ctk.CTk):
         f = filedialog.askopenfilename(
             filetypes=[("Audio", "*.wav *.mp3 *.m4a *.ogg *.flac")])
         if f:
-            self.audio_path = f
-            self.lbl_file_hint.configure(text=f"⏳ Загрузка...", text_color="#aaaaaa")
-            self._update_status("⏳ Обработка длинного файла: это можёт занять несколько секунд...")
-            self.update_idletasks() # Принудительно обновить UI
+            self._load_file(f)
 
-            def _load():
-                try:
-                    y, sr = librosa.load(f, sr=16000, mono=True)
-                    self.playback_data = y.astype(np.float32)
-                    self.original_audio_data = self.playback_data.copy()
-                    self.playback_sr = 16000
-                    self.playback_pos = 0.0
-                    self.after(0, self._on_audio_loaded, f)
-                except Exception as e:
-                    print(f"Плеер: {e}")
-                    self.after(0, self._update_status, f"❌ Ошибка: {e}")
-            threading.Thread(target=_load, daemon=True).start()
+    def _mac_open_document(self, *args):
+        if args and len(args) > 0:
+            self._load_file(args[0])
+
+    def _load_file(self, f):
+        self.audio_path = f
+        self.lbl_file_hint.configure(text=f"⏳ Загрузка...", text_color="#aaaaaa")
+        self._update_status("⏳ Обработка аудиофайла: это можёт занять несколько секунд...")
+        self.update_idletasks() # Принудительно обновить UI
+
+        def _load():
+            try:
+                y, sr = librosa.load(f, sr=16000, mono=True)
+                self.playback_data = y.astype(np.float32)
+                self.original_audio_data = self.playback_data.copy()
+                self.playback_sr = 16000
+                self.playback_pos = 0.0
+                self.after(0, self._on_audio_loaded, f)
+            except Exception as e:
+                print(f"Плеер: {e}")
+                self.after(0, self._update_status, f"❌ Ошибка: {e}")
+        threading.Thread(target=_load, daemon=True).start()
 
     def _on_audio_loaded(self, filepath):
         self.lbl_file_hint.configure(text=os.path.basename(filepath), text_color="#00cc66")
@@ -832,38 +911,57 @@ class QazTriberApp(ctk.CTk):
 
         def play_thread():
             try:
-                # Большой blocksize убирает треск
-                BLOCK = 4096
-
                 def cb(outdata, frames, t, status):
                     if self.stop_playback_event.is_set():
-                        outdata[:] = 0; raise sd.CallbackStop
+                        outdata.fill(0)
+                        raise sd.CallbackStop()
+                    
                     s = int(self.playback_pos)
                     e = s + frames
+                    
                     if self.playback_data is None or s >= len(self.playback_data):
-                        outdata[:] = 0; self.playback_pos = 0.0
-                        self.is_playing = False
-                        self.after(0, self._on_playback_end); raise sd.CallbackStop
+                        outdata.fill(0)
+                        raise sd.CallbackStop()
+                        
                     if e > len(self.playback_data):
                         avail = len(self.playback_data) - s
                         outdata[:avail, 0] = self.playback_data[s:s+avail]
                         outdata[avail:, 0] = 0.0
-                        self.playback_pos = 0.0; self.is_playing = False
-                        self.after(0, self._on_playback_end); raise sd.CallbackStop
+                        self.playback_pos += avail
+                        raise sd.CallbackStop()
+                        
                     outdata[:, 0] = self.playback_data[s:e]
                     self.playback_pos = float(e)
-                    # Обновляем UI ~4 раза в секунду
-                    if int(self.playback_pos) % max(1, self.playback_sr // 4) < frames:
-                        self.after(0, self._refresh_player_label)
 
+                BLOCK = 4096  # Меньший размер блока для стабильности
+                
+                # Пытаемся использовать дефолтное устройство с float32
                 with sd.OutputStream(samplerate=self.playback_sr, channels=1,
-                                     dtype='float32', blocksize=BLOCK, callback=cb,
-                                     latency='high'):
+                                     dtype='float32', blocksize=BLOCK, callback=cb):
+                    
+                    last_ui_update = 0
                     while self.is_playing and not self.stop_playback_event.is_set():
                         sd.sleep(50)
+                        current_pos = int(self.playback_pos)
+                        
+                        # Обновление UI вне колбека (каждые ~0.2 сек)
+                        if current_pos - last_ui_update > (self.playback_sr // 5):
+                            self.after(0, self._refresh_player_label)
+                            last_ui_update = current_pos
+                            
+                        # Если доиграли до конца
+                        if getattr(self, "playback_data", None) is not None:
+                            if current_pos >= len(self.playback_data):
+                                break
+                                
+            except sd.CallbackStop:
+                pass # Нормальное завершение по колбеку
             except Exception as ex:
-                print(f"Playback: {ex}")
-                self.after(0, self.stop_playback)
+                print(f"Playback error: {ex}")
+                self.after(0, self._update_status, f"❌ Ошибка аудио: {ex}")
+            finally:
+                self.playback_pos = 0.0
+                self.after(0, self._on_playback_end)
 
         threading.Thread(target=play_thread, daemon=True).start()
 
@@ -910,12 +1008,19 @@ class QazTriberApp(ctk.CTk):
         if not self.is_recording:
             self.is_recording = True
             self.recording_data = []
-            self.btn_record.configure(text="🛑 Остановить запись", fg_color="#cc0000")
-            self._update_status("🎤 Идёт запись...")
-            
-            # Показываем Waveform в правой панели во время записи
+            self._record_start_time = time.time()
+            self.btn_record.configure(text="⏹ Остановить запись", fg_color="#aa0000", hover_color="#cc0000")
+            self.lbl_file_hint.configure(text="🔴 Идёт запись...", text_color="#ff5555")
             self.waveform.clear()
             self.frame_player.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            self.btn_play_pause.configure(state="disabled")
+            
+            def update_timer():
+                if self.is_recording:
+                    elapsed = int(time.time() - self._record_start_time)
+                    self._update_status(f"🔴 Идёт запись... {elapsed//60}:{elapsed%60:02d}")
+                    self.after(1000, update_timer)
+            self.after(1000, update_timer)
 
             def cb(indata: np.ndarray, frames: int, t, status):
                 if status: print(f"Rec status: {status}")
@@ -971,12 +1076,12 @@ class QazTriberApp(ctk.CTk):
             self.after(0, self.show_player_ui)
 
     def open_recordings_folder(self):
-        import subprocess
-        if sys.platform == "darwin":
-            subprocess.run(["open", RECORDINGS_DIR])
-        else:
-            try: subprocess.run(["xdg-open", RECORDINGS_DIR])
-            except: pass
+        f = filedialog.askopenfilename(
+            initialdir=RECORDINGS_DIR,
+            title="Выберите записанный файл",
+            filetypes=[("Audio", "*.wav *.mp3 *.m4a *.ogg *.flac")])
+        if f:
+            self._load_file(f)
 
     # ================================================================
     # СОХРАНЕНИЕ
@@ -1009,6 +1114,7 @@ class QazTriberApp(ctk.CTk):
             self.stop_playback()
         
         # 2. Очищаем данные аудио
+        self._cleanup_recordings()
         self.audio_path = None
         self.playback_data = None
         self.original_audio_data = None
@@ -1034,7 +1140,7 @@ class QazTriberApp(ctk.CTk):
         # 6. Обновляем статус
         self.p_bar.set(0)
         self.lbl_percent.configure(text="")
-        self._update_status("🟢 Готов к работе. Выберите аудиофайл.", color="#00cc66")
+        self._update_status("🟢 Готов к работе. Выберите аудиофайл.")
 
     def force_stop_asr(self):
         """Немедленно устанавливает stop_event — прерывает между чанками."""
@@ -1045,6 +1151,8 @@ class QazTriberApp(ctk.CTk):
 
     def _apply_crop(self, audio: np.ndarray, sr: int):
         """Callback от WaveformWidget: сохраняет обрезанный кусок как новый audio_path."""
+        if audio is None or len(audio) == 0: return
+        self.waveform.btn_scissors.pack_forget() # Скрываем кнопку обрезки
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"crop_{ts}.wav"
         fpath = os.path.join(RECORDINGS_DIR, fname)
@@ -1058,6 +1166,22 @@ class QazTriberApp(ctk.CTk):
         # Отобразить обрезанный участок на всю ширину волны
         self.waveform.show_waveform(audio, sr)
         self.after(0, self.show_player_ui)
+
+    def _cleanup_recordings(self):
+        """Удаляет все ранее созданные скриптом аудиофайлы rec_ и crop_"""
+        try:
+            if not os.path.exists(RECORDINGS_DIR):
+                return
+            for f in os.listdir(RECORDINGS_DIR):
+                if f.startswith("rec_") or f.startswith("crop_"):
+                    filepath = os.path.join(RECORDINGS_DIR, f)
+                    try:
+                        os.remove(filepath)
+                    except:
+                        pass
+            print("[Cleanup] Временные файлы аудио очищены.")
+        except Exception as e:
+            print(f"Ошибка при очистке: {e}")
 
     # ================================================================
     # СТАТУС И ПРОГРЕСС
@@ -1116,7 +1240,11 @@ class QazTriberApp(ctk.CTk):
                 else:
                     target = variant
             elif method == "saved":
-                target = self.saved_models_var.get()
+                # Имя в UI может быть с префиксом "[Встроенная] "
+                model_val = self.saved_models_var.get()
+                if model_val.startswith("[Встроенная] "):
+                    model_val = model_val.replace("[Встроенная] ", "", 1)
+                target = model_val
                 if target in ["Кэш пуст", "Нет моделей"]:
                     raise ValueError("Выберите модель из списка!")
             else:
@@ -1147,32 +1275,42 @@ class QazTriberApp(ctk.CTk):
             # 3. ШАГ: Транскрибация (по чанкам, прогресс 0→100%)
             self._update_status("⚙️ Транскрибация...", 0.0)
             prompt = self.entry_prompt.get().strip() or None
+            
+            # Для избежания надписи "Здесь появится..." если включена потоковая печать
+            content = self.output_box.get("1.0", "end-1c").strip()
+            if content.startswith("Здесь появится"):
+                self.output_box.delete("1.0", "end")
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                self.output_box.insert("end", f"[{ts}]\n")
+
             try:
                 text = self.engine.transcribe(
                     speech, sr=16000,
                     initial_prompt=prompt,
                     progress_callback=self._update_status,
-                    stop_event=self.stop_event
+                    stop_event=self.stop_event,
+                    text_callback=self._chunk_received
                 )
                 if not text or text.strip() in ["!", "!!", ".", "...", " ", ""]:
                     text = "[Не удалось распознать речь — тишина или шум]"
             finally:
                 self._toggle_pulsing(False)
 
-            # 4. Вывод
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            def _show():
-                self.output_box.insert("end", f"[{ts}]\n{text}\n\n")
-                self.output_box.see("end")
-            self.after(0, _show)
+            # 4. Вывод в конце (если не было callback'ов, или как финал)
+            # Выводим текст только если он еще не был выведен (fallback)
+            final_content = self.output_box.get("1.0", "end-1c").strip()
+            if not final_content.endswith(text.strip()):
+                if text.strip() != "[Не удалось распознать речь — тишина или шум]":
+                    self.after(0, lambda: self.output_box.insert("end", f"\n\n"))
             self._update_status("✅ Готово!", 1.0)
 
-            # 5. Очистка памяти
-            if self.engine:
+            # 5. Очистка памяти (если не включен чекбокс)
+            if self.engine and not self.keep_model_var.get():
                 self.engine.unload_model()
                 self.engine = None
-
-            self.after(0, lambda: messagebox.showinfo("Готово", "Транскрибация завершена!\nПамять освобождена."))
+                self.after(0, lambda: messagebox.showinfo("Готово", "Транскрибация завершена!\nПамять освобождена."))
+            else:
+                self.after(0, lambda: messagebox.showinfo("Готово", "Транскрибация завершена!\nМодель оставлена в памяти (API Mode) для мгновенного старта."))
 
         except InterruptedError:
             # Пользователь нажал Стоп
@@ -1194,23 +1332,44 @@ class QazTriberApp(ctk.CTk):
                 self.output_box.see("end")
             self.after(0, _err)
         finally:
-            self.p_bar.stop()
-            self.p_bar.configure(mode="determinate")
-            self.p_bar.set(1)
-            self.btn_run.configure(state="normal")
-            self.btn_stop.configure(state="disabled", text="⏹ Стоп")
+            def _stop_ui():
+                try:
+                    self.p_bar.stop()
+                    self.p_bar.configure(mode="determinate")
+                    self.p_bar.set(1)
+                    self.btn_run.configure(state="normal")
+                    self.btn_stop.configure(state="disabled", text="⏹ Стоп")
+                except Exception:
+                    pass
+            self.after(0, _stop_ui)
+
+    def _chunk_received(self, text: str):
+        """Выводит распознанный чанк текста в TextBox (безопасно для потоков)."""
+        def _update_ui():
+            content = self.output_box.get("1.0", "end-1c").strip()
+            if content.startswith("Здесь появится"):
+                self.output_box.delete("1.0", "end")
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                self.output_box.insert("end", f"[{ts}]\n")
+            self.output_box.insert("end", f"{text}")
+            self.output_box.see("end")
+        self.after(0, _update_ui)
 
 
 # --- НАСТРОЙКА ПУТЕЙ ---
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "../../.."))
+    INTERNAL_MODELS_DIR = os.path.join(sys._MEIPASS, "dist_models")
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    INTERNAL_MODELS_DIR = os.path.join(BASE_DIR, "dist", "models") # Для локального тестирования
 
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 RECORDINGS_DIR = os.path.join(BASE_DIR, "recordings")
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+if not getattr(sys, 'frozen', False):
+    os.makedirs(INTERNAL_MODELS_DIR, exist_ok=True)
 
 
 if __name__ == "__main__":

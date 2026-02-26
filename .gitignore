@@ -23,7 +23,13 @@ dist/
 
 # Application specific
 recordings/
+models/
 *.pt
+*.wav
+test_*.py
+debug_*.py
+vocab_result.txt
+check_*.py
 
 # IDEs
 .idea/
