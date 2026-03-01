@@ -9,15 +9,25 @@ import numpy as np
 # --- RESOURCE PATH FIX ---
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-        # For PyInstaller 6+, check for _internal folder
-        internal_path = os.path.join(base_path, "_internal")
-        if os.path.exists(internal_path):
-            base_path = internal_path
-    except Exception:
-        base_path = os.path.abspath(".")
+    if not getattr(sys, 'frozen', False):
+        return os.path.join(os.path.abspath("."), relative_path)
+        
+    base_path = sys._MEIPASS
+    # On macOS bundles, data is often in Contents/Resources
+    # On folder/exe (Win/Linux/Mac), data is often in _internal
+    
+    # Check common locations
+    checks = [
+        os.path.join(base_path, "_internal"), # Py6 Folder
+        os.path.join(os.path.dirname(base_path), "Resources"), # Mac Bundle
+        base_path # Parent or fallback
+    ]
+    
+    for p in checks:
+        target = os.path.join(p, relative_path)
+        if os.path.exists(target):
+            return target
+            
     return os.path.join(base_path, relative_path)
 
 # --- DEBUG BOOT ---
