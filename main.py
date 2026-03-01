@@ -5,6 +5,29 @@ import gc
 import socket
 import webbrowser
 import numpy as np
+
+# --- RESOURCE PATH FIX ---
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+        # For PyInstaller 6+, check for _internal folder
+        internal_path = os.path.join(base_path, "_internal")
+        if os.path.exists(internal_path):
+            base_path = internal_path
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+# --- DEBUG BOOT ---
+print("🚀 QazTriber Booting...")
+print(f"Current Dir: {os.getcwd()}")
+print(f"Python: {sys.version}")
+if getattr(sys, 'frozen', False):
+    print(f"Frozen mode! MEIPASS: {getattr(sys, '_MEIPASS', 'not set')}")
+# ------------------
+
 import customtkinter as ctk
 import sounddevice as sd
 import soundfile as sf
@@ -34,6 +57,7 @@ def _is_already_running() -> bool:
         return True
 
 if _is_already_running():
+    print("⚠️ Instance already running. Exiting.")
     sys.exit(0)
 
 # ================================================================
@@ -230,7 +254,7 @@ class QazTriberApp(ctk.CTk):
         self.is_playing = False
         self.playback_pos = 0.0
         self.stop_playback_event = threading.Event()
-        self.recordings_dir = os.path.join(os.getcwd(), "recordings")
+        self.recordings_dir = os.path.expanduser("~/Documents/QazTriber/recordings")
         os.makedirs(self.recordings_dir, exist_ok=True)
         self._rec_buffer = []
         self.record_seconds = 0

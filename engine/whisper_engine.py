@@ -6,13 +6,26 @@ from typing import Optional, Callable
 from faster_whisper import WhisperModel
 from .base import BaseASREngine
 
+import sys
+
 class WhisperEngine(BaseASREngine):
     def __init__(self):
         self._model = None
         self.device = "cpu"
         self.beam_size = 5
         self.current_model_name = "whisper-turbo-ksc2-ct2-v3-clean"
-        self.models_dir = os.path.join(os.getcwd(), "models")
+        
+        # --- PATH HANDLING ---
+        if getattr(sys, 'frozen', False):
+            # Bundled: check for _internal folder (PyInstaller 6+)
+            base_dir = sys._MEIPASS
+            internal_path = os.path.join(base_dir, "_internal")
+            if os.path.exists(internal_path):
+                base_dir = internal_path
+        else:
+            base_dir = os.getcwd()
+            
+        self.models_dir = os.path.join(base_dir, "models")
         os.makedirs(self.models_dir, exist_ok=True)
 
     def load_model(self, model_name: Optional[str] = None, callback: Optional[Callable] = None) -> None:
