@@ -1,15 +1,48 @@
 from __future__ import annotations
 
+import logging
 import math
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+logger = logging.getLogger(__name__)
+
 
 class AudioPreparationError(RuntimeError):
     pass
+
+
+def _bundled_ffmpeg_candidates() -> list[Path]:
+    """Возможные расположения встроенного imageio-ffmpeg бинарника.
+
+    PyInstaller onedir иногда не находит бинарник через ``importlib.resources``
+    внутри ``imageio_ffmpeg.get_ffmpeg_exe()`` — fallback ищет его вручную.
+    """
+    candidates: list[Path] = []
+    try:
+        import imageio_ffmpeg
+        import imageio_ffmpeg._definitions as defs
+
+        plat = defs.get_platform()
+        fname = defs.FNAME_PER_PLATFORM.get(plat)
+        if not fname:
+            return candidates
+
+        # Через __file__ пакета — надёжно и для dev venv, и для PyInstaller onedir.
+        pkg_dir = Path(imageio_ffmpeg.__file__).resolve().parent
+        candidates.append(pkg_dir / "binaries" / fname)
+
+        # Через sys._MEIPASS (PyInstaller runtime-путь к _internal/).
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "imageio_ffmpeg" / "binaries" / fname)
+    except Exception:
+        pass
+    return candidates
 
 
 def ffmpeg_executable() -> str:
@@ -17,9 +50,20 @@ def ffmpeg_executable() -> str:
     try:
         import imageio_ffmpeg
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return "ffmpeg"
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and Path(exe).is_file():
+            return exe
+        logger.warning("imageio_ffmpeg.get_ffmpeg_exe() вернул несуществующий путь: %r", exe)
+    except Exception as error:
+        logger.warning("imageio_ffmpeg.get_ffmpeg_exe() упал: %r", error)
+
+    for candidate in _bundled_ffmpeg_candidates():
+        if candidate.is_file():
+            logger.info("FFmpeg найден через fallback: %s", candidate)
+            return str(candidate)
+
+    logger.warning("Встроенный FFmpeg не найден, fallback на системный ffmpeg")
+    return "ffmpeg"
 
 
 def run_ffmpeg(source: Path, destination: Path, start_seconds: float | None, end_seconds: float | None) -> None:
@@ -37,7 +81,9 @@ def run_ffmpeg(source: Path, destination: Path, start_seconds: float | None, end
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
     except FileNotFoundError as error:
-        raise AudioPreparationError("Встроенный FFmpeg не найден. Переустановите QazTriber из актуального Windows-установщика.") from error
+        raise AudioPreparationError(
+            "Встроенный FFmpeg не найден. Переустановите QazTriber из актуального установщика."
+        ) from error
     except subprocess.CalledProcessError as error:
         message = error.stderr.strip() or "FFmpeg не смог прочитать аудиофайл."
         raise AudioPreparationError(message) from error

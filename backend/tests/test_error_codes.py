@@ -158,7 +158,7 @@ class TestErrorCodeMappingLogic:
 
     def test_ffmpeg_error(self):
         assert self._classify_job_error("FFmpeg не смог прочитать аудиофайл.") == "audio_preparation_failed"
-        assert self._classify_job_error("Встроенный FFmpeg не найден.") == "audio_preparation_failed"
+        assert self._classify_job_error("Встроенный FFmpeg не найден. Переустановите QazTriber из актуального установщика.") == "audio_preparation_failed"
 
     def test_audio_preparation_error(self):
         assert self._classify_job_error("Audio preparation failed") == "audio_preparation_failed"
