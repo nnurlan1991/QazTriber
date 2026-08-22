@@ -18,7 +18,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from .audio import ffmpeg_executable, merge_chunk_texts, split_wav
+from .audio import ffmpeg_executable, merge_chunk_texts, split_wav, split_wav_arrays
 
 MODEL_DOWNLOAD_BASE = "https://qaztribber.aidi-lab.kz/models/desktop"
 
@@ -523,17 +523,43 @@ class GigaAMService:
         cancelled: Callable[[], bool],
     ) -> str:
         self.load(model_id, report)
-        chunks = split_wav(wav_path, chunks_dir)
+        chunks = split_wav_arrays(wav_path)
+        total_chunks = len(chunks)
+        if total_chunks == 0:
+            return ""
+
+        from gigaam.model import AudioDataset
+
+        device = self.device()
+        if device in {"mps", "cuda"}:
+            batch_size = 8 if model_id == "220m" else 4
+        else:
+            batch_size = 4
+
         texts: list[str] = []
-        for index, chunk_path in enumerate(chunks, start=1):
+        for batch_start in range(0, total_chunks, batch_size):
             if cancelled():
                 raise InterruptedError("Задача отменена пользователем.")
-            fraction = 0.3 + 0.65 * ((index - 1) / len(chunks))
-            report(f"Распознавание фрагмента {index}/{len(chunks)}…", fraction)
+            batch_end = min(batch_start + batch_size, total_chunks)
+            batch_chunks = chunks[batch_start:batch_end]
+
+            fraction = 0.3 + 0.65 * (batch_start / total_chunks)
+            if batch_end > batch_start + 1:
+                report(f"Распознавание фрагментов {batch_start + 1}-{batch_end}/{total_chunks}…", fraction)
+            else:
+                report(f"Распознавание фрагмента {batch_start + 1}/{total_chunks}…", fraction)
+
             with self._lock:
-                raw_text = self._model.transcribe(str(chunk_path))
-            if hasattr(raw_text, "text"):
-                raw_text = raw_text.text
-            texts.append(str(raw_text).strip())
+                with torch.inference_mode():
+                    tensors = [torch.from_numpy(c) for c in batch_chunks]
+                    wav_pad, wav_lens = AudioDataset.collate(tensors)
+                    wav_pad = wav_pad.to(self._model._device).to(self._model._dtype)
+                    wav_lens = wav_lens.to(self._model._device)
+                    encoded, encoded_len = self._model.forward(wav_pad, wav_lens)
+                    decoded = self._model._decode(encoded, encoded_len, wav_lens, word_timestamps=False)
+                    for item in decoded:
+                        raw_text = item[0] if isinstance(item, (tuple, list)) else getattr(item, "text", str(item))
+                        texts.append(str(raw_text).strip())
+
         report("Объединение результата…", 0.97)
         return merge_chunk_texts(texts)

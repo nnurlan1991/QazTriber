@@ -94,6 +94,28 @@ def wav_duration_seconds(path: Path) -> float:
     return float(info.frames / info.samplerate)
 
 
+def split_wav_arrays(path: Path, max_seconds: float = 20.0, overlap_seconds: float = 0.4) -> list[np.ndarray]:
+    """Нарезает аудио на numpy float32 массивы в памяти без лишней записи на диск."""
+    audio, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+    if audio.ndim > 1:
+        audio = audio[:, 0]
+    max_samples = int(max_seconds * sample_rate)
+    overlap_samples = int(overlap_seconds * sample_rate)
+    if len(audio) <= max_samples:
+        return [audio]
+
+    chunks: list[np.ndarray] = []
+    start = 0
+    step = max_samples - overlap_samples
+    while start < len(audio):
+        end = min(start + max_samples, len(audio))
+        chunks.append(audio[start:end])
+        if end == len(audio):
+            break
+        start += step
+    return chunks
+
+
 def split_wav(path: Path, output_dir: Path, max_seconds: float = 20.0, overlap_seconds: float = 0.4) -> list[Path]:
     """Создаёт короткие WAV-фрагменты для базового long-audio режима ИИ модели."""
     audio, sample_rate = sf.read(path, dtype="float32", always_2d=False)
