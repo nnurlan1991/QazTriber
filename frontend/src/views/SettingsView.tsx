@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { useApp } from "../store";
 import { LANGS } from "../i18n";
 import { Icon } from "../icons";
 import { Logo } from "../Logo";
 import { getLogs, type LogEntry } from "../api";
-
-const APP_VERSION = "1.0.0";
 
 export function SettingsView() {
   const { t, lang, setLang, prefs, setPrefs, models } = useApp();
@@ -15,8 +14,14 @@ export function SettingsView() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  // ponytail: версия берётся из tauri.conf.json через Tauri API — === версия GitHub релиза (тег v{version}), без сетевого запроса, работает офлайн
+  const [appVersion, setAppVersion] = useState<string>("");
   const versionClicksRef = useRef(0);
   const versionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion(""));
+  }, []);
 
   function handleVersionClick() {
     versionClicksRef.current += 1;
@@ -100,12 +105,12 @@ export function SettingsView() {
           <Logo size={56} variant="mark" />
           <div className="stack" style={{ gap: 2 }}>
             <h2 className="h2 gold-text">{t("app.name")}</h2>
-            <span className="mono faint" style={{ fontSize: 11 }}>{t("app.tagline")} · {t("app.version")} {APP_VERSION}</span>
+            <span className="mono faint" style={{ fontSize: 11 }}>{t("app.tagline")} · {t("app.version")} {appVersion || "—"}</span>
           </div>
         </div>
         <p className="muted" style={{ fontSize: 13, lineHeight: 1.6 }}>{t("settings.aboutDesc")}</p>
         <div className="divider" />
-        <div className="meta-row"><span className="meta-key">{t("settings.version")}</span><span className="meta-val mono" style={{ cursor: "pointer", userSelect: "none" }} onClick={handleVersionClick}>{APP_VERSION}</span></div>
+        <div className="meta-row"><span className="meta-key">{t("settings.version")}</span><span className="meta-val mono" style={{ cursor: "pointer", userSelect: "none" }} onClick={handleVersionClick}>{appVersion || "—"}</span></div>
         <div className="meta-row"><span className="meta-key">{t("settings.locale")}</span><span className="meta-val mono">{lang === "kz" ? "kk-KZ" : "ru-RU"}</span></div>
         <div className="meta-row"><span className="meta-key">{t("settings.engine")}</span><span className="meta-val mono" style={{ fontSize: 12 }}>ИИ модель для распознавания</span></div>
       </section>
