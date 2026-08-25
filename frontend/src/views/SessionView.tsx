@@ -389,7 +389,7 @@ export function SessionView() {
           onChange={(e) => setText(e.target.value)}
           onBlur={() => text !== null && patchSession(session.id, { transcript: text, transcriptPreview: text.slice(0, 120) })}
           placeholder={t("session.placeholder")}
-          style={{ minHeight: 320 }}
+          style={{ minHeight: 220 }}
         />
         {session.errorMessage && <div className="notice error mt-4"><Icon name="error" size={18} /><span>{session.errorMessage}</span></div>}
       </section>

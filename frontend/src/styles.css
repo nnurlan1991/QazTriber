@@ -449,6 +449,20 @@ a { color: inherit; text-decoration: none; }
   .hero-zone-r { order: 2; border-left: none; border-top: 1px solid var(--border-soft); padding-top: var(--sp-3); padding-left: 0; margin-top: var(--sp-2); }
   .hero-zone-b { order: 3; border-left: none; border-top: 1px solid var(--border-soft); padding-top: var(--sp-3); }
   .hero-zone-c { order: 4; }
+  /* Складываем две колонки в одну — иначе транскрипт зажат в узкую полосу
+     при неразвернутом окне (sidebar 248px + 2×340px не помещаются). */
+  .home-grid { grid-template-columns: 1fr; }
+  .home-grid > .card { min-height: auto; }
+  /* В одну колонку контент выше экрана — нужен скролл вместо обрезки. */
+  .content.home { overflow-y: auto; }
+  /* Уменьшаем боковые отступы на узких окнах. */
+  .content { padding: var(--sp-6) var(--sp-6); }
+}
+@media (max-height: 680px) {
+  /* При малой высоте окна (неразвернутое по вертикали) — разрешаем скролл,
+     иначе transcript + hero обрезаются overflow: hidden. */
+  .content.home { overflow-y: auto; }
+  textarea.home-transcript { min-height: 160px; }
 }
 @media (max-width: 640px) {
   .home-hero-compact { padding: var(--sp-3); }
@@ -475,8 +489,11 @@ a { color: inherit; text-decoration: none; }
 .audio-duration-bar .time { font-family: var(--font-mono); font-size: 12px; color: var(--on-surface-variant); min-width: 42px; }
 .audio-duration-bar .time.strong { color: var(--on-surface); font-weight: 600; }
 .transcribe-progress { padding: var(--sp-4); border-radius: var(--r-sm); background: var(--overlay-bg); border: 1px solid var(--glass-border); }
-.home-transcript { flex: 1; min-height: 0; resize: none; }
-.result-actions-row { display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto; padding-top: var(--sp-3); border-top: 1px solid var(--border-softer); }
+/* textarea.home-transcript — повышена специфичность, чтобы min-height: 0
+   побеждал базовый .transcript { min-height: 280px }, иначе в неразвернутом
+   окне textarea не сжимается и переполняет контент (overflow: hidden). */
+textarea.home-transcript { flex: 1; min-height: 0; resize: none; }
+.result-actions-row { display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto; flex-wrap: wrap; padding-top: var(--sp-3); border-top: 1px solid var(--border-softer); }
 
 /* ---------- Typography ---------- */
 .h-display {
