@@ -320,11 +320,12 @@ class JobManager:
         else:
             job.update_stage("text_postprocessing", "completed", 1.0, "Пропущено (сервис не настроен)")
 
-        # L1.2: выгружаем punct-модель сразу после использования
-        try:
-            self.punct_restorer.unload()
-        except Exception:
-            pass
+        # Выгружаем punct-модель сразу после использования — точно как GigaAM
+        if self.punct_restorer is not None:
+            try:
+                self.punct_restorer.unload()
+            except Exception:
+                pass
 
         job.update_stage("done", "completed", 1.0, "Готово")
         job.text = final_text

@@ -3,7 +3,6 @@ from __future__ import annotations
 import gc
 import logging
 import threading
-import time
 from pathlib import Path
 
 import torch
@@ -20,9 +19,6 @@ MAX_LEN = 128           # лимит сабвордов, с которым мо�
 MAX_WORDS = 50          # максимум слов на окно (50 слов → ~118 сабвордов, влезает в 128)
 OVERLAP_WORDS = 10      # перекрытие между окнами
 BATCH_WINDOWS = 8       # сколько окон гонять за один forward (L2.2)
-
-# Модель выгружается если не использовалась N секунд (L1.2)
-_IDLE_UNLOAD_SECONDS = 300
 
 
 def _pick_device() -> torch.device:
@@ -79,9 +75,9 @@ class PunctCaseModel(PreTrainedModel):
 class PunctRestoreService:
     """Восстановление пунктуации и регистра в тексте, полученном от GigaAM.
 
-    Модель загружается лениво (fp16 на MPS/CUDA — L1.1), выгружается автоматически
-    после простоя (L1.2). Инференс батчится по BATCH_WINDOWS окон за forward (L2.2),
-    используется ``torch.inference_mode`` для экономии памяти (L2.3).
+    Модель загружается лениво (fp16 на MPS/CUDA), выгружается явно сразу после
+    использования (как GigaAM). Инференс батчится по BATCH_WINDOWS окон за forward,
+    используется ``torch.inference_mode`` для экономии памяти.
     """
 
     def __init__(self, model_dir: Path):
@@ -90,8 +86,6 @@ class PunctRestoreService:
         self._tokenizer = None
         self._device: torch.device | None = None
         self._lock = threading.Lock()
-        self._last_used: float = 0.0
-        self._idle_thread: threading.Thread | None = None
 
     @property
     def is_available(self) -> bool:
@@ -99,11 +93,9 @@ class PunctRestoreService:
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
-            self._last_used = time.time()
             return
         with self._lock:
             if self._model is not None:
-                self._last_used = time.time()
                 return
             if not self.is_available:
                 raise FileNotFoundError(
@@ -138,28 +130,7 @@ class PunctRestoreService:
                 model = model.half()
             self._model = model
             self._device = device
-            self._last_used = time.time()
-            self._start_idle_watcher()
             logger.info("Punct-restore модель загружена на %s (fp16=%s)", device, device.type in {"cuda", "mps"})
-
-    def _start_idle_watcher(self) -> None:
-        """L1.2: фоновый поток выгружает модель после _IDLE_UNLOAD секунд простоя."""
-        if self._idle_thread is not None and self._idle_thread.is_alive():
-            return
-
-        def watcher():
-            while True:
-                time.sleep(60)
-                if self._model is None:
-                    return
-                idle = time.time() - self._last_used
-                if idle > _IDLE_UNLOAD_SECONDS:
-                    logger.info("Punct-restore модель выгружена после %dс простоя", int(idle))
-                    self.unload()
-                    return
-
-        self._idle_thread = threading.Thread(target=watcher, name="punct-idle-unload", daemon=True)
-        self._idle_thread.start()
 
     def unload(self) -> None:
         """L1.2: выгружает модель из памяти."""
@@ -277,8 +248,6 @@ class PunctRestoreService:
                 restored = restored_batch[j]
                 skip = 0 if start_idx == 0 else OVERLAP_WORDS
                 out_words.extend(restored[skip:])
-
-        self._last_used = time.time()
 
         text = " ".join(out_words)
         if text.endswith(","):

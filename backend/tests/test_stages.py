@@ -52,11 +52,11 @@ class TestStagesTracking:
     # -----------------------------------------------------------------
     def test_stages_initialized_as_pending(self) -> None:
         job = self._make_job()
-        assert len(job.stages) == 6, f"expected 6 stages, got {len(job.stages)}"
+        assert len(job.stages) == 7, f"expected 7 stages, got {len(job.stages)}"
 
         expected_names = [
             "audio_preparation", "model_download", "model_load",
-            "transcription", "merging", "done",
+            "transcription", "merging", "text_postprocessing", "done",
         ]
         for i, stage in enumerate(job.stages):
             assert stage["name"] == expected_names[i], f"stage[{i}] name mismatch"
@@ -119,7 +119,7 @@ class TestStagesTracking:
         response = job_response(job)
 
         assert isinstance(response, JobResponse)
-        assert len(response.stages) == 6
+        assert len(response.stages) == 7
 
         # Verify structure of a completed stage
         audio_stage = response.stages[0]
@@ -136,7 +136,7 @@ class TestStagesTracking:
         assert response.stages[2].progress == 0.5
 
         # Remaining stages should be pending
-        for i in range(3, 6):
+        for i in range(3, 7):
             assert response.stages[i].status == "pending", f"stage[{i}] should be pending"
 
     # -----------------------------------------------------------------
@@ -157,10 +157,10 @@ class TestStagesTracking:
         assert job.status == JobStatus.completed, job.error
         assert job.text == "Сәлем әлем"
 
-        # Verify all 6 stages reached a non-pending state
+        # Verify all 7 stages reached a non-pending state
         expected_names = [
             "audio_preparation", "model_download", "model_load",
-            "transcription", "merging", "done",
+            "transcription", "merging", "text_postprocessing", "done",
         ]
         for stage_name in expected_names:
             matching = [s for s in job.stages if s["name"] == stage_name]
