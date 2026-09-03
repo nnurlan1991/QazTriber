@@ -17,6 +17,7 @@ const STAGE_ORDER: StageStatus["name"][] = [
   "model_load",
   "transcription",
   "merging",
+  "text_postprocessing",
   "done",
 ];
 

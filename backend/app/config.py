@@ -37,6 +37,19 @@ class Settings:
         return self.app_data_dir / "models"
 
     @property
+    def punct_model_dir(self) -> Path:
+        """Локальная папка с моделью восстановления пунктуации/регистра.
+
+        Без механизма скачивания (dev-контур): содержимое
+        punct_case_model_v2_final/ копируется сюда вручную (см. Шаг 1 ТЗ).
+        Переопределяется переменной окружения QAZTRIBER_PUNCT_MODEL_DIR.
+        """
+        configured = os.getenv("QAZTRIBER_PUNCT_MODEL_DIR")
+        if configured:
+            return Path(configured).expanduser()
+        return self.models_dir / "punct_v2"
+
+    @property
     def jobs_dir(self) -> Path:
         return self.app_data_dir / "jobs"
 

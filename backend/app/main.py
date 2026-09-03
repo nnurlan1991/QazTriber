@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 import sys
 from pathlib import Path
 
@@ -13,6 +14,9 @@ from .config import settings
 from .logging_config import init_logging
 from .services.gigaam import GigaAMService, ModelPreloadManager
 from .services.jobs import JobManager
+from .services.punct_restore import PunctRestoreService
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -21,7 +25,14 @@ async def lifespan(app: FastAPI):
     settings.ensure_directories()
     app.state.gigaam = GigaAMService(settings.models_dir)
     app.state.preload = ModelPreloadManager(app.state.gigaam)
-    app.state.jobs = JobManager(settings.jobs_dir, app.state.gigaam)
+    app.state.punct_restorer = PunctRestoreService(settings.punct_model_dir)
+    if not app.state.punct_restorer.is_available:
+        logger.warning(
+            "Punct-restore модель не найдена в %s — транскрипты будут без "
+            "восстановленной пунктуации, пока вы не скопируете туда веса.",
+            settings.punct_model_dir,
+        )
+    app.state.jobs = JobManager(settings.jobs_dir, app.state.gigaam, app.state.punct_restorer)
     yield
 
 

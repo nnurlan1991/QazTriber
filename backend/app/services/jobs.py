@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import threading
 import time
@@ -13,6 +14,9 @@ from ..config import settings
 from ..schemas import JobStatus
 from .audio import run_ffmpeg, wav_duration_seconds
 from .gigaam import GigaAMService
+from .punct_restore import PunctRestoreService
+
+logger = logging.getLogger(__name__)
 
 
 _DEFAULT_STAGES: list[dict] = [
@@ -21,6 +25,7 @@ _DEFAULT_STAGES: list[dict] = [
     {"name": "model_load", "status": "pending", "progress": 0.0, "detail": ""},
     {"name": "transcription", "status": "pending", "progress": 0.0, "detail": ""},
     {"name": "merging", "status": "pending", "progress": 0.0, "detail": ""},
+    {"name": "text_postprocessing", "status": "pending", "progress": 0.0, "detail": ""},
     {"name": "done", "status": "pending", "progress": 0.0, "detail": ""},
 ]
 
@@ -70,9 +75,10 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, jobs_dir: Path, gigaam: GigaAMService):
+    def __init__(self, jobs_dir: Path, gigaam: GigaAMService, punct_restorer: PunctRestoreService | None = None):
         self.jobs_dir = jobs_dir
         self.gigaam = gigaam
+        self.punct_restorer = punct_restorer
         self._jobs: dict[str, Job] = {}
         self._queue: list[str] = []
         self._lock = threading.RLock()
@@ -291,12 +297,44 @@ class JobManager:
                 raise RuntimeError("transcription_timeout")
             raise InterruptedError
         job.update_stage("merging", "completed", 1.0, "Результат объединён")
-        job.update_stage("done", "completed", 1.0, "Готово")
-        job.text = text
-        job.update(JobStatus.completed, "Готово", 1.0)
-        # Persist transcription.txt to disk so it survives backend restart
+
+        # L1.3: выгружаем GigaAM перед punct-restore — обе модели в RAM не нужны.
+        # L1.4: освобождаем кэш MPS/CUDA после тяжёлой ASR-модели.
         try:
-            (job.directory / "transcription.txt").write_text(text, encoding="utf-8")
+            self.gigaam.unload()
+        except Exception:
+            pass
+
+        # Stage: text_postprocessing — восстановление пунктуации и регистра.
+        # Это улучшение поверх сырого текста, не критичный путь: если модель
+        # недоступна или упала — отдаём пользователю сырой текст, а не валим job.
+        job.update_stage("text_postprocessing", "in_progress", 0.0, "Расстановка пунктуации…")
+        final_text = text
+        if self.punct_restorer is not None:
+            try:
+                final_text = self.punct_restorer.restore(text)
+                job.update_stage("text_postprocessing", "completed", 1.0, "Пунктуация восстановлена")
+            except Exception as error:
+                logger.warning("Punct-restore failed for job %s, falling back to raw text: %s", job.id, error)
+                job.update_stage("text_postprocessing", "failed", 1.0, "Пропущено (модель недоступна)")
+        else:
+            job.update_stage("text_postprocessing", "completed", 1.0, "Пропущено (сервис не настроен)")
+
+        # L1.2: выгружаем punct-модель сразу после использования
+        try:
+            self.punct_restorer.unload()
+        except Exception:
+            pass
+
+        job.update_stage("done", "completed", 1.0, "Готово")
+        job.text = final_text
+        job.update(JobStatus.completed, "Готово", 1.0)
+        # Persist transcription.txt to disk so it survives backend restart.
+        # Сырой текст (до пунктуации) тоже сохраняем — пригодится для отладки
+        # и для пересчёта другой версией punct-restore модели без повторного ASR.
+        try:
+            (job.directory / "transcription_raw.txt").write_text(text, encoding="utf-8")
+            (job.directory / "transcription.txt").write_text(final_text, encoding="utf-8")
         except OSError:
             pass
         # Update metadata.json with completion status

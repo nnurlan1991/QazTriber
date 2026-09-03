@@ -21,7 +21,7 @@ export type Model = {
 };
 
 export type StageStatus = {
-  name: "audio_preparation" | "model_download" | "model_load" | "transcription" | "merging" | "done";
+  name: "audio_preparation" | "model_download" | "model_load" | "transcription" | "merging" | "text_postprocessing" | "done";
   status: "pending" | "in_progress" | "completed" | "failed";
   progress: number;
   detail: string;

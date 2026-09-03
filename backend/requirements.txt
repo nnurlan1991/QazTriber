@@ -8,4 +8,5 @@ numpy>=2.0,<3.0
 torch>=2.6
 torchaudio>=2.6
 gigaam @ git+https://github.com/salute-developers/GigaAM.git
+transformers>=4.46,<5.0
 pytest>=8.0,<9.0

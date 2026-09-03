@@ -59,3 +59,8 @@ recordings/
 .pytest_cache/
 *.tsbuildinfo
 graphify-out/
+
+# Punct-restore model weights (never commit — downloaded/placed locally)
+punct_v2/
+**/punct_v2/
+punct_case_model_v2_final/
