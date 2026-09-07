@@ -1,6 +1,6 @@
 [package]
 name = "qaztriber"
-version = "1.3.10"
+version = "1.4.0"
 description = "QazTriber — локальная расшифровка совещаний"
 authors = ["QazTriber"]
 edition = "2021"
