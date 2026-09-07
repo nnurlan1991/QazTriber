@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { AppProvider, useApp } from "./store";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { Sidebar } from "./components/Sidebar";
@@ -47,6 +48,83 @@ function ViewRouter() {
 }
 
 type SidecarStatus = "connected" | "restarting" | "unreachable" | "failed";
+
+interface DictationEventPayload {
+  kind: string;
+  error_code?: string | null;
+  detail?: string | null;
+}
+
+interface DictationStatus {
+  enabled: boolean;
+  hotkey: string;
+  trigger: "hold" | "toggle";
+  insertMode: "type" | "paste" | "clipboard";
+  model: "220m" | "600m";
+  language: string;
+  recording: boolean;
+  processing: boolean;
+}
+
+/** Мост frontend ↔ Rust-движок диктовки: применение настроек, тосты, синк с треем. */
+function DictationBridge() {
+  const { prefs, setPrefs, setError, t } = useApp();
+  const { dictationEnabled, dictationHotkey, dictationTrigger, dictationInsertMode, defaultModel } = prefs;
+
+  // Применяем настройки к Rust-движку при каждом изменении (и на старте приложения).
+  useEffect(() => {
+    invoke("dictation_configure", {
+      enabled: dictationEnabled,
+      hotkey: dictationHotkey,
+      trigger: dictationTrigger,
+      insertMode: dictationInsertMode,
+      model: defaultModel,
+      language: "mixed",
+    }).catch((e) => {
+      const message = String(e);
+      if (message.startsWith("[hotkey_register_failed]")) {
+        setError(t("dictation.hotkeyConflict"));
+      } else {
+        setError(`${t("dictation.configureError")}: ${message}`);
+      }
+      // Синк с реальным состоянием движка, а не слепой откат:
+      // при неудачной смене хоткея диктовка остаётся включённой.
+      invoke<DictationStatus>("dictation_status")
+        .then((status) => setPrefs({ dictationEnabled: status.enabled }))
+        .catch(() => {});
+    });
+    // t намеренно не в зависимостях — чтобы не пережигать конфиг при смене языка.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dictationEnabled, dictationHotkey, dictationTrigger, dictationInsertMode, defaultModel]);
+
+  // События движка: ошибки — тост; переключение из трея — синк prefs.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<DictationEventPayload>("dictation-event", (event) => {
+      const { kind, error_code: code, detail } = event.payload;
+      if (kind === "error") {
+        if (code === "hotkey_register_failed") {
+          setError(t("dictation.hotkeyConflict"));
+        } else {
+          setError(detail || t("common.error"));
+        }
+      } else if (kind === "enabled-changed") {
+        // Переключили из трея — синхронизируем настройки (это не наша apply, т.к. enabled расходится).
+        invoke<DictationStatus>("dictation_status").then((status) => {
+          if (status.enabled !== prefs.dictationEnabled) {
+            setPrefs({ dictationEnabled: status.enabled });
+          }
+        }).catch(() => {});
+      }
+    }).then((fn) => { unlisten = fn; }).catch(() => {
+      // Не в Tauri-контексте (dev-браузер)
+    });
+    return () => { if (unlisten) unlisten(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs.dictationEnabled]);
+
+  return null;
+}
 
 function Shell() {
   const [sidecarStatus, setSidecarStatus] = useState<SidecarStatus | null>(null);
@@ -166,6 +244,7 @@ function Shell() {
         <TopBar onOpenDownloadModal={() => setShowDownloadModal(true)} />
         <ViewRouter />
       </main>
+      <DictationBridge />
       <GlobalError />
       {showOnboarding && (
         <OnboardingModal

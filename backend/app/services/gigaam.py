@@ -275,6 +275,10 @@ class GigaAMService:
     def is_cached(self, model_id: str) -> bool:
         return self.model_path(model_id).is_file()
 
+    def is_loaded(self, model_id: str) -> bool:
+        """Модель уже в памяти (нужно для warmup диктовки)."""
+        return self._active_model_id == model_id and self._model is not None
+
     def model_path(self, model_id: str) -> Path:
         if model_id not in MODELS:
             raise ValueError("Допустимы только модели 220M и 600M.")

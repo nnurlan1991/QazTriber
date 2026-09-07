@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
+mod dictation;
+
+use dictation::{DictationManager, TrayHandles};
+
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: u16 = 8765;
 const DEV_URL: &str = "http://localhost:5173";
@@ -365,6 +369,43 @@ fn save_and_open_txt(content: String, filename: String) -> Result<String, String
     }
 }
 
+/// Трей-иконка: статус диктовки, открытие окна, выход.
+fn setup_tray(app: tauri::AppHandle) -> Result<(), tauri::Error> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let dictation_item = MenuItem::with_id(&app, "dictation-toggle", "Диктовка: выключена", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(&app, "open", "Открыть QazTriber", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(&app, "quit", "Выход", true, None::<&str>)?;
+    let menu = Menu::with_items(&app, &[&dictation_item, &open_item, &quit_item])?;
+
+    let mut tray = TrayIconBuilder::with_id("qaztriber-tray")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip("QazTriber")
+        .on_menu_event(|app_handle, event| match event.id().as_ref() {
+            "dictation-toggle" => {
+                app_handle.state::<DictationManager>().toggle_enabled();
+            }
+            "open" => {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app_handle.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(&app)?;
+    app.manage(TrayHandles {
+        dictation_item,
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared_child: SharedChild = Arc::new(Mutex::new(None));
@@ -374,9 +415,31 @@ pub fn run() {
     // the setup closure (via managed state) and the run callback
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, open_folder, open_url, save_and_open_txt])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            open_folder,
+            open_url,
+            save_and_open_txt,
+            dictation::dictation_configure,
+            dictation::dictation_status,
+            dictation::dictation_permissions,
+        ])
         .manage(shared_child.clone())
         .manage(shutdown.clone())
+        .on_window_event(|window, event| {
+            // Диктовка должна работать при закрытом окне: прячем в трей вместо выхода.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let enabled = window
+                    .app_handle()
+                    .try_state::<DictationManager>()
+                    .map(|manager| manager.is_enabled())
+                    .unwrap_or(false);
+                if enabled {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(move |app| {
             let url = if cfg!(debug_assertions) {
                 DEV_URL.to_string()
@@ -424,6 +487,11 @@ pub fn run() {
                 .min_inner_size(900.0, 600.0)
                 .center()
                 .build()?;
+
+            setup_tray(app.handle().clone())?;
+            let dictation = DictationManager::new(app.handle().clone());
+            app.manage(dictation);
+            dictation::spawn_event_loop(app.handle().clone());
 
             Ok(())
         })

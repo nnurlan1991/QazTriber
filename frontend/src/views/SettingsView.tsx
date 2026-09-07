@@ -1,10 +1,67 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { useApp } from "../store";
 import { LANGS } from "../i18n";
 import { Icon } from "../icons";
 import { Logo } from "../Logo";
 import { getLogs, type LogEntry } from "../api";
+
+const isMac = navigator.userAgent.includes("Mac");
+const MODIFIER_CODES = new Set([
+  "AltLeft", "AltRight", "ControlLeft", "ControlRight",
+  "ShiftLeft", "ShiftRight", "MetaLeft", "MetaRight",
+]);
+
+function formatHotkey(hotkey: string): string {
+  return hotkey
+    .split("+")
+    .map((part) => {
+      const p = part.trim();
+      if (p.startsWith("Key")) return p.slice(3).toUpperCase();
+      if (p.startsWith("Digit")) return p.slice(5);
+      return p.charAt(0).toUpperCase() + p.slice(1);
+    })
+    .join(" + ");
+}
+
+function HotkeyRecorder({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { t } = useApp();
+  const [capturing, setCapturing] = useState(false);
+
+  useEffect(() => {
+    if (!capturing) return;
+    const handler = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setCapturing(false);
+        return;
+      }
+      if (MODIFIER_CODES.has(e.code)) return;
+      const mods: string[] = [];
+      if (e.ctrlKey) mods.push("ctrl");
+      if (e.altKey) mods.push("alt");
+      if (e.shiftKey) mods.push("shift");
+      if (e.metaKey) mods.push("cmd");
+      // Без модификатора хоткей (F5, буква) проглатывался бы системно, пока диктовка включена.
+      if (mods.length === 0) return;
+      onChange([...mods, e.code].join("+"));
+      setCapturing(false);
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [capturing, onChange]);
+
+  if (capturing) {
+    return <span className="meta-val mono" style={{ color: "var(--status-warn, #f59e0b)" }}>{t("dictation.hotkeyRecord")}</span>;
+  }
+  return (
+    <button className="btn btn-soft sm mono" onClick={() => setCapturing(true)}>
+      {formatHotkey(value)}
+    </button>
+  );
+}
 
 export function SettingsView() {
   const { t, lang, setLang, prefs, setPrefs, models } = useApp();
@@ -16,12 +73,35 @@ export function SettingsView() {
   const [showDebug, setShowDebug] = useState(false);
   // ponytail: версия берётся из tauri.conf.json через Tauri API — === версия GitHub релиза (тег v{version}), без сетевого запроса, работает офлайн
   const [appVersion, setAppVersion] = useState<string>("");
+  const [accessibility, setAccessibility] = useState<boolean | null>(null);
   const versionClicksRef = useRef(0);
   const versionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => setAppVersion(""));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const recheck = () => {
+      invoke<{ accessibility: boolean }>("dictation_permissions")
+        .then((p) => { if (!cancelled) setAccessibility(p.accessibility); })
+        .catch(() => {});
+    };
+    recheck();
+    // Право выдают в Системных настройках: при возврате в окно предупреждение должно сняться сразу.
+    document.addEventListener("visibilitychange", recheck);
+    window.addEventListener("focus", recheck);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", recheck);
+      window.removeEventListener("focus", recheck);
+    };
+  }, [prefs.dictationEnabled]);
+
+  function openAccessibility() {
+    invoke("open_url", { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" }).catch(() => {});
+  }
 
   function handleVersionClick() {
     versionClicksRef.current += 1;
@@ -97,6 +177,41 @@ export function SettingsView() {
           </div>
         </div>
         <div className="meta-row"><span className="meta-key">{t("settings.engine")}</span><span className="meta-val mono" style={{ fontSize: 12 }}>{t("settings.engineValue")}</span></div>
+      </section>
+
+      {/* Dictation (push-to-talk) */}
+      <section className="card pad mb-6">
+        <div className="row-flex gap-3 mb-4"><Icon name="mic" size={22} /><h2 className="h2">{t("dictation.title")}</h2></div>
+        <p className="muted" style={{ fontSize: 13, lineHeight: 1.6, marginTop: -8, marginBottom: 12 }}>{t("dictation.desc")}</p>
+        <div className="meta-row"><span className="meta-key">{t("dictation.state")}</span>
+          <div className="segmented">
+            <button className={prefs.dictationEnabled ? "active" : ""} onClick={() => setPrefs({ dictationEnabled: true })}>{t("dictation.on")}</button>
+            <button className={!prefs.dictationEnabled ? "active" : ""} onClick={() => setPrefs({ dictationEnabled: false })}>{t("dictation.off")}</button>
+          </div>
+        </div>
+        <div className="meta-row"><span className="meta-key">{t("dictation.hotkey")}</span>
+          <HotkeyRecorder value={prefs.dictationHotkey} onChange={(hotkey) => setPrefs({ dictationHotkey: hotkey })} />
+        </div>
+        <div className="meta-row"><span className="meta-key">{t("dictation.trigger")}</span>
+          <div className="segmented">
+            <button className={prefs.dictationTrigger === "hold" ? "active" : ""} onClick={() => setPrefs({ dictationTrigger: "hold" })}>{t("dictation.triggerHold")}</button>
+            <button className={prefs.dictationTrigger === "toggle" ? "active" : ""} onClick={() => setPrefs({ dictationTrigger: "toggle" })}>{t("dictation.triggerToggle")}</button>
+          </div>
+        </div>
+        <div className="meta-row"><span className="meta-key">{t("dictation.insertMode")}</span>
+          <div className="segmented">
+            <button className={prefs.dictationInsertMode === "type" ? "active" : ""} onClick={() => setPrefs({ dictationInsertMode: "type" })}>{t("dictation.insertType")}</button>
+            <button className={prefs.dictationInsertMode === "paste" ? "active" : ""} onClick={() => setPrefs({ dictationInsertMode: "paste" })}>{t("dictation.insertPaste")}</button>
+            <button className={prefs.dictationInsertMode === "clipboard" ? "active" : ""} onClick={() => setPrefs({ dictationInsertMode: "clipboard" })}>{t("dictation.insertClipboard")}</button>
+          </div>
+        </div>
+        {isMac && prefs.dictationEnabled && prefs.dictationInsertMode !== "clipboard" && accessibility === false && (
+          <div className="notice error" style={{ marginTop: 12 }}>
+            <Icon name="error" size={18} />
+            <div style={{ flex: 1, fontSize: 12 }}>{t("dictation.accessibilityWarning")}</div>
+            <button className="btn btn-soft sm" onClick={openAccessibility}>{t("dictation.openAccessibility")}</button>
+          </div>
+        )}
       </section>
 
       {/* About */}

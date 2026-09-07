@@ -125,6 +125,8 @@ backend/app/
 packaging/build_release.py   PyInstaller + strip_sidecar()
 src-tauri/tauri.conf.json    Tauri config + ЕДИНЫЙ ИСТОЧНИК ВЕРСИИ (поле version)
 src-tauri/Cargo.toml         дублирует version
+src-tauri/src/dictation.rs   диктовка push-to-talk (хоткей+захват+вставка, см. docs/DICTATION.md)
+backend/app/api/dictation.py POST /api/dictate, /api/dictate/warmup (синхронная диктовка, без job)
 .github/workflows/release.yml  CI сборка desktop
 .github/workflows/pages.yml    CI деплой лендинга
 landing/index.html            лендинг

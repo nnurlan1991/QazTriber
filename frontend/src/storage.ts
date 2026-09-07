@@ -32,9 +32,21 @@ export interface Prefs {
   lang: "ru" | "kz";
   theme: "light" | "dark" | "system";
   defaultModel: "220m" | "600m";
+  dictationEnabled: boolean;
+  dictationHotkey: string;
+  dictationTrigger: "hold" | "toggle";
+  dictationInsertMode: "type" | "paste" | "clipboard";
 }
 
-const DEFAULT_PREFS: Prefs = { lang: "ru", theme: "dark", defaultModel: "220m" };
+const DEFAULT_PREFS: Prefs = {
+  lang: "ru",
+  theme: "dark",
+  defaultModel: "220m",
+  dictationEnabled: false,
+  dictationHotkey: "alt+shift+KeyD",
+  dictationTrigger: "hold",
+  dictationInsertMode: "type",
+};
 
 function safeParse<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;

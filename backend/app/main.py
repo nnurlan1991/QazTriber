@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .api.dictation import router as dictation_router
 from .api.transcriptions import router
 from .config import settings
 from .logging_config import init_logging
@@ -44,6 +45,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+app.include_router(dictation_router)
 
 
 @app.get("/api/health")
