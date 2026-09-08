@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from ..services.audio import run_ffmpeg, wav_duration_seconds
 from ..services.gigaam import GigaAMService, MODELS
+from ..services.jobs import JobManager
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,22 @@ async def dictate(
         logger.error("Dictation failed: %s", error)
         return JSONResponse(status_code=500, content={"detail": f"Ошибка диктовки: {error}"})
     return {"text": text, "duration_seconds": duration}
+
+
+@router.post("/unload")
+def dictate_unload(request: Request) -> dict[str, str]:
+    """Выгружает модель из памяти — вызывается при выключении диктовки.
+
+    Если идёт расшифровка, выгрузка откладывается: джоба сама выгрузит модель
+    после завершения.
+    """
+    gigaam: GigaAMService = request.app.state.gigaam
+    jobs: JobManager = request.app.state.jobs
+    if jobs.has_running():
+        return JSONResponse(status_code=409, content={"detail": "Идёт расшифровка — выгрузка отложена."})
+    if gigaam.unload_active():
+        return {"status": "unloaded"}
+    return {"status": "idle"}
 
 
 @router.post("/warmup")

@@ -123,6 +123,14 @@ class JobManager:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def has_running(self) -> bool:
+        """Есть ли задача, занимающая модель прямо сейчас."""
+        with self._lock:
+            return any(
+                job.status in {JobStatus.queued, JobStatus.preparing, JobStatus.loading_model, JobStatus.transcribing}
+                for job in self._jobs.values()
+            )
+
     def cancel(self, job_id: str) -> Job | None:
         job = self.get(job_id)
         if job is None:

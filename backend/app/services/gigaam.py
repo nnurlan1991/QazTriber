@@ -279,6 +279,13 @@ class GigaAMService:
         """Модель уже в памяти (нужно для warmup диктовки)."""
         return self._active_model_id == model_id and self._model is not None
 
+    def unload_active(self) -> bool:
+        """Выгружает активную модель из памяти (диктовка выключена)."""
+        with self._lock:
+            was_loaded = self._model is not None
+            self.unload()
+            return was_loaded
+
     def model_path(self, model_id: str) -> Path:
         if model_id not in MODELS:
             raise ValueError("Допустимы только модели 220M и 600M.")
@@ -554,6 +561,9 @@ class GigaAMService:
                 report(f"Распознавание фрагмента {batch_start + 1}/{total_chunks}…", fraction)
 
             with self._lock:
+                if self._model is None:
+                    # Гонка с выгрузкой модели (выключение диктовки) между батчами.
+                    self.load(model_id, report)
                 with torch.inference_mode():
                     tensors = [torch.from_numpy(c) for c in batch_chunks]
                     wav_pad, wav_lens = AudioDataset.collate(tensors)

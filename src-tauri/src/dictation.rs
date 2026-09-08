@@ -197,6 +197,8 @@ impl DictationManager {
 
         if enabled {
             self.spawn_warmup(&config.model);
+        } else {
+            self.spawn_unload();
         }
         self.update_tray();
         self.emit("enabled-changed", None, None);
@@ -282,6 +284,22 @@ impl DictationManager {
                 }
             }
             // Не критично: первая диктовка просто загрузит модель на месте.
+        });
+    }
+
+    /// Выгрузка модели из памяти при выключении диктовки (освобождает ~1–2.4 ГБ RAM).
+    /// Не критично: если идёт расшифровка, джоба выгрузит модель сама.
+    fn spawn_unload(&self) {
+        std::thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let url = format!("{BACKEND_URL}/api/dictate/unload");
+            let _ = client.post(&url).send();
         });
     }
 
