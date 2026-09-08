@@ -9,6 +9,7 @@
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,13 +67,24 @@ impl Default for Config {
     }
 }
 
+/// Активный захват. `cpal::Stream` здесь не хранится: на Windows он `!Send`
+/// (WASAPI/COM-указатели), поэтому живёт в выделенном потоке захвата, а
+/// останавливается через канал `stop` (drop отправителя тоже останавливает).
 struct Recording {
-    stream: cpal::Stream,
     buffer: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     channels: u16,
     started: Instant,
     generation: usize,
+    stop: mpsc::Sender<()>,
+}
+
+/// Готовый захват, возвращённый потоком записи.
+struct CaptureHandle {
+    buffer: Arc<Mutex<Vec<f32>>>,
+    sample_rate: u32,
+    channels: u16,
+    stop: mpsc::Sender<()>,
 }
 
 pub struct TrayHandles {
@@ -133,12 +145,9 @@ impl DictationManager {
     /// Применяет новую конфигурацию: (пере)регистрирует хоткей, обновляет трей,
     /// запускает warmup модели. Ошибки регистрации хоткея возвращаются вызывающему.
     pub fn apply(&self, config: Config) -> Result<(), String> {
-        if !config.enabled {
-            // Выключение: остановить активную запись.
-            if let Some(recording) = self.recording.lock().unwrap().take() {
-                drop(recording.stream);
-                self.emit("recording-stopped", None, None);
-            }
+        if !config.enabled && self.recording.lock().unwrap().take().is_some() {
+            // Поток захвата завершится по drop отправителя stop-канала.
+            self.emit("recording-stopped", None, None);
         }
 
         let hotkey_str = config.hotkey.clone();
@@ -274,19 +283,29 @@ impl DictationManager {
         if self.processing.load(Ordering::SeqCst) {
             return;
         }
-        let mut recording = self.recording.lock().unwrap();
-        if recording.is_some() {
+        if self.recording.lock().unwrap().is_some() {
             // toggle: второй press останавливает.
             if self.config.lock().unwrap().trigger == "toggle" {
-                drop(recording);
                 self.stop_and_process();
             }
             return;
         }
         match self.start_capture() {
-            Ok(rec) => {
-                let generation = rec.generation;
-                *recording = Some(rec);
+            Ok(handle) => {
+                let mut recording = self.recording.lock().unwrap();
+                if recording.is_some() {
+                    return; // двойной press: вторую попытку бросаем
+                }
+                let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                self.mic_error_reported.store(false, Ordering::SeqCst);
+                *recording = Some(Recording {
+                    buffer: handle.buffer,
+                    sample_rate: handle.sample_rate,
+                    channels: handle.channels,
+                    started: Instant::now(),
+                    generation,
+                    stop: handle.stop,
+                });
                 drop(recording);
                 play_sound("start");
                 self.update_tray();
@@ -317,7 +336,7 @@ impl DictationManager {
     fn stop_and_process(&self) {
         let recording = self.recording.lock().unwrap().take();
         let Some(recording) = recording else { return };
-        drop(recording.stream);
+        let _ = recording.stop.send(()); // поток захвата завершится и уронит Stream
         play_sound("stop");
         self.update_tray();
         self.emit("recording-stopped", None, None);
@@ -350,57 +369,85 @@ impl DictationManager {
         });
     }
 
-    fn start_capture(&self) -> Result<Recording, String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| "Микрофон не найден.".to_string())?;
-        let supported = device
-            .default_input_config()
-            .map_err(|e| format!("Микрофон недоступен: {e}"))?;
-        let config: cpal::StreamConfig = supported.clone().into();
-
-        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-        let stream_buffer = buffer.clone();
+    fn start_capture(&self) -> Result<CaptureHandle, String> {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let mic_reported = self.mic_error_reported.clone();
         let app = self.app.clone();
-        let max_samples = (MAX_RECORD_SECS as u32) * supported.sample_rate();
 
-        let error_callback = move |_error| {
-            if !mic_reported.swap(true, Ordering::SeqCst) {
-                let _ = app.emit(
-                    "dictation-event",
-                    DictationEvent {
-                        kind: "error".into(),
-                        error_code: Some("mic_error".into()),
-                        detail: Some("Ошибка захвата микрофона (проверьте доступ в настройках системы).".into()),
-                    },
-                );
+        // Stream живёт в этом потоке до сигнала остановки: на Windows
+        // cpal::Stream — !Send, его нельзя унести в managed state.
+        std::thread::spawn(move || {
+            let host = cpal::default_host();
+            let Some(device) = host.default_input_device() else {
+                let _ = ready_tx.send(Err("Микрофон не найден.".to_string()));
+                return;
+            };
+            let supported = match device.default_input_config() {
+                Ok(config) => config,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("Микрофон недоступен: {e}")));
+                    return;
+                }
+            };
+            let config: cpal::StreamConfig = supported.clone().into();
+
+            let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+            let stream_buffer = buffer.clone();
+            let max_samples = (MAX_RECORD_SECS as u32) * supported.sample_rate();
+
+            let error_callback = move |_error| {
+                if !mic_reported.swap(true, Ordering::SeqCst) {
+                    let _ = app.emit(
+                        "dictation-event",
+                        DictationEvent {
+                            kind: "error".into(),
+                            error_code: Some("mic_error".into()),
+                            detail: Some("Ошибка захвата микрофона (проверьте доступ в настройках системы).".into()),
+                        },
+                    );
+                }
+            };
+
+            let data_callback = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut buf = stream_buffer.lock().unwrap();
+                if buf.len() < max_samples as usize {
+                    buf.extend_from_slice(data);
+                }
+            };
+
+            let stream = match device.build_input_stream::<f32, _, _>(
+                &config,
+                data_callback,
+                error_callback,
+                None,
+            ) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("Не удалось начать запись с микрофона: {e}")));
+                    return;
+                }
+            };
+            if let Err(e) = stream.play() {
+                let _ = ready_tx.send(Err(format!("Не удалось начать запись с микрофона: {e}")));
+                return;
             }
-        };
 
-        let data_callback = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let mut buf = stream_buffer.lock().unwrap();
-            if buf.len() < max_samples as usize {
-                buf.extend_from_slice(data);
-            }
-        };
+            let _ = ready_tx.send(Ok((supported.sample_rate(), supported.channels(), buffer)));
+            // Спим до сигнала остановки (или drop отправителя) — Stream умрёт здесь же.
+            let _ = stop_rx.recv();
+        });
 
-        let stream = device
-            .build_input_stream::<f32, _, _>(&config, data_callback, error_callback, None)
-            .map_err(|e| format!("Не удалось начать запись с микрофона: {e}"))?;
-        stream.play().map_err(|e| format!("Не удалось начать запись с микрофона: {e}"))?;
-
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.mic_error_reported.store(false, Ordering::SeqCst);
-        Ok(Recording {
-            stream,
-            buffer,
-            sample_rate: supported.sample_rate(),
-            channels: supported.channels(),
-            started: Instant::now(),
-            generation,
-        })
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok((sample_rate, channels, buffer))) => Ok(CaptureHandle {
+                buffer,
+                sample_rate,
+                channels,
+                stop: stop_tx,
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err("Микрофон не ответил вовремя (5 с).".to_string()),
+        }
     }
 
     fn process(&self, samples: Vec<f32>, sample_rate: u32, config: Config) {

@@ -63,6 +63,11 @@ def main() -> None:
         "omegaconf",
         "--collect-all",
         "torchaudio",
+        # transformers импортирует модели динамически (importlib) — PyInstaller
+        # не видит их статически; без этого punct-restore падает в бандле:
+        # "No module named 'transformers.models.metaclip_2'" (fallback без пунктуации).
+        "--hidden-import",
+        "transformers.models.metaclip_2",
         "--paths",
         str(ROOT),
         str(ROOT / "packaging" / "launcher.py"),

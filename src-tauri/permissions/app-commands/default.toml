@@ -1,0 +1,11 @@
+[[permission]]
+identifier = "app-commands"
+description = "Разрешает главному окну вызывать команды приложения. Фронтенд в релизе отдаётся sidecar-сервером (remote origin), поэтому без явного разрешения invoke блокируется ACL."
+commands.allow = [
+  "open_folder",
+  "open_url",
+  "save_and_open_txt",
+  "dictation_configure",
+  "dictation_status",
+  "dictation_permissions",
+]

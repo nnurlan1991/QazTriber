@@ -315,7 +315,7 @@ class JobManager:
                 final_text = self.punct_restorer.restore(text)
                 job.update_stage("text_postprocessing", "completed", 1.0, "Пунктуация восстановлена")
             except Exception as error:
-                logger.warning("Punct-restore failed for job %s, falling back to raw text: %s", job.id, error)
+                logger.warning("Punct-restore failed for job %s, falling back to raw text: %s", job.id, error, exc_info=True)
                 job.update_stage("text_postprocessing", "failed", 1.0, "Пропущено (модель недоступна)")
         else:
             job.update_stage("text_postprocessing", "completed", 1.0, "Пропущено (сервис не настроен)")

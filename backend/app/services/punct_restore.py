@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, AutoTokenizer, PreTrainedModel
+from transformers import AutoConfig, AutoModel, AutoTokenizer, PreTrainedModel, XLMRobertaConfig
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,10 @@ class PunctCaseModel(PreTrainedModel):
     ключи state_dict (веса лежат под ``roberta.*``).
     """
 
-    config_class = AutoConfig.from_pretrained("xlm-roberta-base").__class__
+    # XLMRobertaConfig напрямую: раньше тут был AutoConfig.from_pretrained(
+    # "xlm-roberta-base"), который при импорте модуля ходил в HuggingFace Hub —
+    # в офлайн-бандле это падало (zlib-ошибка на сетевом ответе).
+    config_class = XLMRobertaConfig
     base_model_prefix = "roberta"
 
     def __init__(self, config):
