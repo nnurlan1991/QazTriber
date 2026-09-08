@@ -14,10 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use global_hotkey::hotkey::HotKey;
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 // В dev-сборке backend запускают на :8000 (vite-прокси), в релизе sidecar живёт на :8765.
 const BACKEND_URL: &str = if cfg!(debug_assertions) {
@@ -94,8 +93,10 @@ pub struct TrayHandles {
 pub struct DictationManager {
     app: AppHandle,
     config: Mutex<Config>,
-    hotkey_manager: Mutex<Option<GlobalHotKeyManager>>,
-    registered_hotkey: Mutex<Option<HotKey>>,
+    // GlobalHotKeyManager на Windows !Send — им владеет плагин
+    // global-shortcut (регистрация идёт в main thread), здесь только
+    // текущая активная комбинация для матчинга событий и apply().
+    registered_hotkey: Mutex<Option<Shortcut>>,
     recording: Mutex<Option<Recording>>,
     processing: AtomicBool,
     generation: AtomicUsize,
@@ -115,12 +116,26 @@ impl DictationManager {
         Self {
             app,
             config: Mutex::new(Config::default()),
-            hotkey_manager: Mutex::new(None),
             registered_hotkey: Mutex::new(None),
             recording: Mutex::new(None),
             processing: AtomicBool::new(false),
             generation: AtomicUsize::new(0),
             mic_error_reported: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Событие хоткея от плагина global-shortcut (press/release).
+    pub fn handle_shortcut(&self, shortcut: &Shortcut, pressed: bool) {
+        {
+            let active = self.registered_hotkey.lock().unwrap();
+            if active.as_ref() != Some(shortcut) {
+                return;
+            }
+        }
+        if pressed {
+            self.on_press();
+        } else {
+            self.on_release();
         }
     }
 
@@ -153,39 +168,30 @@ impl DictationManager {
         let hotkey_str = config.hotkey.clone();
         let enabled = config.enabled;
 
-        // Регистрация хоткея: unregister старого, register нового.
-        let mut manager_guard = self.hotkey_manager.lock().unwrap();
-        if manager_guard.is_none() {
-            *manager_guard = Some(
-                GlobalHotKeyManager::new()
-                    .map_err(|e| format!("Не удалось инициализировать глобальные хоткеи: {e}"))?,
-            );
-        }
-        let manager = manager_guard.as_ref().unwrap();
-
+        // Регистрация хоткея через плагин global-shortcut: register/unregister
+        // выполняются в main thread (на Windows GlobalHotKeyManager !Send).
+        // Новый регистрируем ДО снятия старого: при неудаче прежний хоткей
+        // продолжает работать; при неизменной комбинации нет цикла
+        // unregister/register — системный захват клавиши не мигает.
         let mut registered = self.registered_hotkey.lock().unwrap();
         if enabled {
-            let hotkey: HotKey = hotkey_str
+            let hotkey: Shortcut = hotkey_str
                 .parse()
                 .map_err(|e| format!("[hotkey_register_failed] Некорректная комбинация «{hotkey_str}»: {e}"))?;
-            // Новый регистрируем ДО снятия старого: при неудаче прежний хоткей
-            // продолжает работать; при неизменной комбинации нет цикла
-            // unregister/register — системный захват клавиши не мигает.
-            let same = registered.as_ref().map(|h| h.id() == hotkey.id()).unwrap_or(false);
-            if !same {
-                manager
+            if registered.as_ref() != Some(&hotkey) {
+                self.app
+                    .global_shortcut()
                     .register(hotkey)
                     .map_err(|e| format!("[hotkey_register_failed] Комбинация «{hotkey_str}» занята другой программой: {e}"))?;
                 if let Some(old) = registered.take() {
-                    let _ = manager.unregister(old);
+                    let _ = self.app.global_shortcut().unregister(old);
                 }
                 *registered = Some(hotkey);
             }
         } else if let Some(old) = registered.take() {
-            let _ = manager.unregister(old);
+            let _ = self.app.global_shortcut().unregister(old);
         }
         drop(registered);
-        drop(manager_guard);
 
         *self.config.lock().unwrap() = config.clone();
 
@@ -656,25 +662,6 @@ fn format_hotkey(hotkey: &str) -> String {
         .join("+")
 }
 
-/// Цикл обработки событий хоткея — один поток на всё время жизни приложения.
-pub fn spawn_event_loop(app: AppHandle) {
-    std::thread::spawn(move || {
-        for event in GlobalHotKeyEvent::receiver().iter() {
-            let manager = app.state::<DictationManager>();
-            let active = manager.registered_hotkey.lock().unwrap();
-            let Some(hotkey) = active.as_ref() else { continue };
-            if event.id() != hotkey.id() {
-                continue;
-            }
-            drop(active);
-            match event.state() {
-                HotKeyState::Pressed => manager.on_press(),
-                HotKeyState::Released => manager.on_release(),
-            }
-        }
-    });
-}
-
 // ------------------------------------------------------------------
 // Tauri-команды (вызывает frontend)
 // ------------------------------------------------------------------
@@ -718,7 +705,7 @@ mod tests {
 
     #[test]
     fn frontend_hotkey_strings_parse() {
-        // JS KeyboardEvent.code → "модификаторы+Code" — формат должен парситься global-hotkey.
+        // JS KeyboardEvent.code → "модификаторы+Code" — формат должен парситься плагином.
         for combo in [
             "alt+shift+KeyD",
             "ctrl+shift+Space",
@@ -728,7 +715,7 @@ mod tests {
             "alt+Comma",
         ] {
             assert!(
-                combo.parse::<HotKey>().is_ok(),
+                combo.parse::<Shortcut>().is_ok(),
                 "не распарсился хоткей: {combo}"
             );
         }

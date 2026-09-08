@@ -415,6 +415,16 @@ pub fn run() {
     // the setup closure (via managed state) and the run callback
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    app.state::<DictationManager>().handle_shortcut(
+                        shortcut,
+                        event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed,
+                    );
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             greet,
             open_folder,
@@ -491,7 +501,6 @@ pub fn run() {
             setup_tray(app.handle().clone())?;
             let dictation = DictationManager::new(app.handle().clone());
             app.manage(dictation);
-            dictation::spawn_event_loop(app.handle().clone());
 
             Ok(())
         })
