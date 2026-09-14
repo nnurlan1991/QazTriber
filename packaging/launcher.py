@@ -30,6 +30,12 @@ def main() -> None:
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    # CLI-режим: `qaztriber-backend transcribe file.mp3` — без HTTP-сервера
+    # (см. backend/app/cli.py и docs/CLI.md).
+    if len(sys.argv) > 1 and sys.argv[1] == "transcribe":
+        from backend.app.cli import main as cli_main
+
+        raise SystemExit(cli_main(sys.argv[2:]))
     # Логирование настроено в backend.app.main lifespan через init_logging()
     # (RotatingFileHandler в sidecar.log). Uvicorn-конфиг отключён, чтобы
     # избежать дублирования обработчиков.

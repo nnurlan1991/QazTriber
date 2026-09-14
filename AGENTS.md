@@ -55,6 +55,13 @@ npm run tauri build
   - `POST /api/dictate/unload` — выгрузка модели из памяти (вызывается при выключении диктовки в настройках)
 - **Гайд:** `docs/DICTATION.md`
 
+## CLI Transcription (v1.4.2+) — транскрипция из терминала для агентов
+
+- **Быстрый старт:** `qaztriber-backend transcribe file.mp3` → текст в stdout (прогресс в stderr). `--json`, `--no-punct`, `--download`, stdin через `-`.
+- **Контракт для агентов:** exit 0 ок / 1 ошибка / 2 модель не скачана. Полный контракт: **`docs/CLI.md`**.
+- **Dev-режим:** `backend/.venv/bin/python -m backend.app.cli transcribe file.mp3` (из корня репо). Файлы: `backend/app/cli.py`, `packaging/launcher.py`, smoke: `backend/scripts/cli_smoke_test.py`.
+
+
 ## Punct-restore (v1.3.7+) — восстановление пунктуации и регистра
 
 - **Модель:** XLM-RoBERTa с двумя головами (punct + case), локальная директория из `settings.punct_model_dir` (складывается из `punct_case_model_v2_final/`). Поддержка int8 (загрузка вручную, минуя `from_pretrained`).
@@ -143,6 +150,7 @@ frontend/src/
 backend/app/
   api/transcriptions.py     /transcribe, /system, /sessions, /logs
   api/dictation.py          POST /api/dictate, /api/dictate/warmup, /api/dictate/unload (синхронная диктовка, без job)
+  cli.py                    CLI: transcribe file.mp3 → текст в stdout (см. docs/CLI.md)
   services/gigaam.py        wrapper ИИ модели, MODEL_DOWNLOAD_BASE, device() → mps|cpu
   services/punct_restore.py punct+case модель (XLM-RoBERTa), int8, unload после транскрипции
   services/quantize_punct.py int8-квантование punct-модели
