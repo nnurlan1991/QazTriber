@@ -55,7 +55,7 @@ npm run tauri build
   - `POST /api/dictate/unload` — выгрузка модели из памяти (вызывается при выключении диктовки в настройках)
 - **Гайд:** `docs/DICTATION.md`
 
-## CLI Transcription (v1.4.2+) — транскрипция из терминала для агентов
+## CLI Transcription (v1.4.3+) — транскрипция из терминала для агентов
 
 - **Быстрый старт:** `qaztriber-backend transcribe file.mp3` → текст в stdout (прогресс в stderr). `--json`, `--no-punct`, `--download`, stdin через `-`.
 - **Контракт для агентов:** exit 0 ок / 1 ошибка / 2 модель не скачана. Полный контракт: **`docs/CLI.md`**.
