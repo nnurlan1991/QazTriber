@@ -2,7 +2,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
@@ -18,6 +18,23 @@ const MAX_RESTART_ATTEMPTS: u32 = 5;
 const MIN_UPTIME_FOR_RESET_SECS: u64 = 30;
 
 type SharedChild = Arc<Mutex<Option<Child>>>;
+
+// Kill sidecar при любом штатном выходе процесса. RunEvent::ExitRequested
+// недостаточно: Apple-quit (Cmd+Q / Dock-Quit / AppleEvent) в tao не эмитится —
+// AppKit завершает процесс изнутри run-loop в обход Tauri-коллбеков, и sidecar
+// оставался висеть сиротой (воспроизведено на macOS 1.4.3). atexit —
+// единственный хук, гарантированно срабатывающий при exit(0).
+static EXIT_SIDECAR: OnceLock<SharedChild> = OnceLock::new();
+
+extern "C" fn kill_sidecar_at_exit() {
+    if let Some(shared) = EXIT_SIDECAR.get() {
+        let mut guard = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 #[derive(Clone, serde::Serialize)]
 struct SidecarStatus {
@@ -409,6 +426,12 @@ fn setup_tray(app: tauri::AppHandle) -> Result<(), tauri::Error> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared_child: SharedChild = Arc::new(Mutex::new(None));
+    let _ = EXIT_SIDECAR.set(shared_child.clone());
+    // Регистрируем до старта приложения: хук идемпотентен (take → None), так что
+    // повторный kill из RunEvent::ExitRequested безвреден.
+    if unsafe { libc::atexit(kill_sidecar_at_exit) } != 0 {
+        eprintln!("Failed to register sidecar atexit handler");
+    }
     let shutdown = Arc::new(AtomicBool::new(false));
 
     // Build separately so we can pass shared_child to both
